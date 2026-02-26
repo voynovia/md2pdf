@@ -404,6 +404,12 @@ func NewPdfRenderer(params PdfRendererParams) *PdfRenderer {
 		o(r)
 	}
 
+	// Синхронизация начального контейнера с финальным r.Normal.
+	// Opts callbacks могут изменить r.Normal (через json.Unmarshal),
+	// начальный textStyle должен отражать финальное значение,
+	// иначе standalone-параграфы используют устаревший стиль.
+	r.cs.stack[0].textStyle = r.Normal
+
 	return r
 }
 
