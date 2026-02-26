@@ -192,7 +192,7 @@ func ExtractTextFromNode(node ast.Node) string {
 		return ast.GoToNext
 	})
 
-	return text.String()
+	return strings.ReplaceAll(text.String(), "\t", "    ")
 }
 
 // GetTOCEntries returns TOC entries

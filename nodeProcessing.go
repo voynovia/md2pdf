@@ -45,6 +45,7 @@ func (r *PdfRenderer) processText(node *ast.Text) {
 	currentStyle := r.cs.peek().textStyle
 	r.setStyler(currentStyle)
 	s := string(node.Literal)
+	s = strings.ReplaceAll(s, "\t", "    ") // TAB → 4 пробела (fpdf не поддерживает U+0009)
 	if !r.NeedBlockquoteStyleUpdate {
 		s = strings.ReplaceAll(s, "\n", " ")
 	}
