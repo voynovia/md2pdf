@@ -594,6 +594,71 @@ func (r *PdfRenderer) processHTMLBlock(node ast.Node) {
 	r.cr()
 }
 
+// renderTableRow рендерит буферизированную строку таблицы с word wrap.
+// Все ячейки строки рендерятся с одинаковой высотой (максимальной из всех).
+func (r *PdfRenderer) renderTableRow() {
+	if len(rowCells) == 0 {
+		return
+	}
+
+	// Фаза 1: вычислить макс. количество строк
+	maxLines := 1
+	for i, cell := range rowCells {
+		if i >= len(cellwidths) {
+			break
+		}
+		r.setStyler(cell.style)
+		lines := r.Pdf.SplitText(cell.text, cellwidths[i])
+		if len(lines) > maxLines {
+			maxLines = len(lines)
+		}
+	}
+
+	// Высота строки текста и общая высота строки таблицы
+	lineH := rowCells[0].style.Size + rowCells[0].style.Spacing
+	rowH := lineH * float64(maxLines)
+
+	// Начальная позиция
+	startX := r.cs.peek().leftMargin
+	startY := r.Pdf.GetY()
+
+	// Фаза 2: рендеринг каждой ячейки
+	x := startX
+	for i, cell := range rowCells {
+		if i >= len(cellwidths) {
+			break
+		}
+		w := cellwidths[i]
+		r.setStyler(cell.style)
+
+		// Фон ячейки
+		if cell.isHeader || fill {
+			r.Pdf.Rect(x, startY, w, rowH, "F")
+		}
+
+		// Границы ячейки
+		if cell.isHeader {
+			r.Pdf.Rect(x, startY, w, rowH, "D")
+		} else {
+			r.Pdf.Line(x, startY, x, startY+rowH)
+			r.Pdf.Line(x+w, startY, x+w, startY+rowH)
+		}
+
+		// Текст ячейки (MultiCell с word wrap, без border/fill — уже нарисованы)
+		r.Pdf.SetXY(x, startY)
+		align := ""
+		if cell.isHeader {
+			align = "C"
+		}
+		r.Pdf.MultiCell(w, lineH, cell.text, "", align, false)
+
+		x += w
+	}
+
+	// Переместить курсор под строку
+	r.Pdf.SetXY(startX, startY+rowH)
+}
+
 func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 	if entering {
 		r.tracer("Table (entering)", "")
@@ -640,7 +705,6 @@ func (r *PdfRenderer) processTableBody(node ast.Node, entering bool) {
 	} else {
 		r.cs.pop()
 		r.tracer("TableBody (leaving)", "")
-		r.Pdf.Ln(-1)
 	}
 }
 
@@ -653,12 +717,13 @@ func (r *PdfRenderer) processTableRow(node ast.Node, entering bool) {
 		if r.cs.peek().isHeader {
 			x.textStyle = r.THeader
 		}
-		r.Pdf.Ln(-1)
 
 		// initialize cell widths slice; only one table at a time!
 		curdatacell = 0
+		rowCells = nil
 		r.cs.push(x)
 	} else {
+		r.renderTableRow()
 		r.cs.pop()
 		r.tracer("TableRow (leaving)", "")
 		fill = !fill
@@ -690,19 +755,11 @@ func (r *PdfRenderer) processTableCell(node ast.TableCell, entering bool) {
 		if cs.cellInnerStringStyle != nil {
 			currentStyle = *cs.cellInnerStringStyle
 		}
-		s := cs.cellInnerString
-		w := cellwidths[curdatacell]
-		if cs.isHeader {
-			h, _ := r.Pdf.GetFontSize()
-			h += currentStyle.Spacing
-			r.tracer("... table header cell",
-				fmt.Sprintf("Width=%v, height=%v", w, h))
-
-			r.Pdf.CellFormat(w, h, s, "1", 0, "C", true, 0, "")
-		} else {
-			h := currentStyle.Size + currentStyle.Spacing
-			r.Pdf.CellFormat(w, h, s, "LR", 0, "", fill, 0, "")
-		}
+		rowCells = append(rowCells, cellContent{
+			text:     cs.cellInnerString,
+			style:    currentStyle,
+			isHeader: cs.isHeader,
+		})
 		r.tracer("TableCell (leaving)", "")
 		curdatacell++
 	}

@@ -494,6 +494,20 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 				intable = true
 			} else {
 				intable = false
+				// масштабировать ширины столбцов до ширины страницы
+				pageW, _ := r.Pdf.GetPageSize()
+				_, _, rightM, _ := r.Pdf.GetMargins()
+				usableW := pageW - r.mleft - rightM
+				totalW := 0.0
+				for _, w := range lengths {
+					totalW += w
+				}
+				if totalW > usableW {
+					scale := usableW / totalW
+					for i := range lengths {
+						lengths[i] *= scale
+					}
+				}
 				columnWidths[node] = lengths
 			}
 

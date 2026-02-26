@@ -36,6 +36,16 @@ var curdatacell int
 var fill = false
 var incell = false
 
+// cellContent содержит данные ячейки для отложенного рендеринга строки.
+type cellContent struct {
+	text     string
+	style    Styler
+	isHeader bool
+}
+
+// rowCells — буфер ячеек текущей строки таблицы.
+var rowCells []cellContent
+
 func (n listType) String() string {
 	switch n {
 	case notlist:
