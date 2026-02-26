@@ -49,6 +49,9 @@ var rowCells []cellContent
 // headerCells — сохранённые ячейки заголовка для повторения при page break.
 var headerCells []cellContent
 
+// headerRendered — флаг: заголовок уже отрендерен (отложенный рендеринг).
+var headerRendered bool
+
 func (n listType) String() string {
 	switch n {
 	case notlist:

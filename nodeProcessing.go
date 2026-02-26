@@ -645,6 +645,10 @@ func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFi
 
 // renderTableRow рендерит буферизированную строку таблицы с word wrap.
 // Все ячейки строки рендерятся с одинаковой высотой (максимальной из всех).
+//
+// Заголовок рендерится отложенно: при обработке header row он сохраняется,
+// но НЕ рендерится. При первом body row обе высоты известны точно —
+// выполняется exact check headerH + bodyRowH > available.
 func (r *PdfRenderer) renderTableRow() {
 	if len(rowCells) == 0 {
 		return
@@ -655,23 +659,31 @@ func (r *PdfRenderer) renderTableRow() {
 	_, _, _, bottomM := r.Pdf.GetMargins()
 
 	if rowCells[0].isHeader {
-		// Orphan prevention: заголовок + минимум одна строка тела
-		bodyLineH := r.TBody.Size + r.TBody.Spacing
-		if r.Pdf.GetY()+rowH+bodyLineH > pageH-bottomM {
-			r.Pdf.AddPage()
-		}
-		// Сохранить заголовок для повторения при page break
+		// Отложенный рендеринг: сохранить заголовок, но НЕ рендерить.
+		// Рендерим при первом body row, когда высота обоих известна точно.
 		headerCells = make([]cellContent, len(rowCells))
 		copy(headerCells, rowCells)
+		headerRendered = false
+		return
+	}
+
+	if !headerRendered && len(headerCells) > 0 {
+		// Первый body row — рендерим отложенный заголовок + body row.
+		hLineH, hRowH := r.rowHeight(headerCells)
+		if r.Pdf.GetY()+hRowH+rowH > pageH-bottomM {
+			r.Pdf.AddPage()
+		}
+		r.renderCells(headerCells, hLineH, hRowH, false)
+		headerRendered = true
+		fill = false
 	} else if r.Pdf.GetY()+rowH > pageH-bottomM {
-		// Замыкающая линия таблицы перед page break
+		// Не первый body row — page break + repeat header.
 		wSum := 0.0
 		for _, w := range cellwidths {
 			wSum += w
 		}
 		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
 
-		// Строка тела не помещается — новая страница с повторным заголовком
 		r.Pdf.AddPage()
 		if len(headerCells) > 0 {
 			hLineH, hRowH := r.rowHeight(headerCells)
@@ -693,8 +705,15 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		r.cs.push(x)
 		fill = false
 		headerCells = nil
+		headerRendered = false
 		cellwidths = r.ColumnWidths[node]
 	} else {
+		if !headerRendered && len(headerCells) > 0 {
+			hLineH, hRowH := r.rowHeight(headerCells)
+			r.renderCells(headerCells, hLineH, hRowH, false)
+			headerRendered = true
+		}
+
 		wSum := 0.0
 		for _, w := range cellwidths {
 			wSum += w
