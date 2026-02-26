@@ -254,6 +254,29 @@ func TestMathInline(t *testing.T) {
 	}
 }
 
+// TestTableInsideListItem проверяет таблицу с 2-space indent внутри list item.
+// Воспроизводит точный контекст из Maldives/5.Altimeter setting/ENG.md.
+func TestTableInsideListItem(t *testing.T) {
+	md := "- f) for deviations of greater than 10NM...\n" +
+		"\n" +
+		"  |                         | Deviation >10NM | Level change                   |\n" +
+		"  | ----------------------- | --------------- | ------------------------------ |\n" +
+		"  | EAST 000-179 magnetic | LEFT<br />RIGHT | DESCEND 300ft<br />CLIMB 300ft |\n" +
+		"  | WEST 180-359 magnetic | LEFT<br />RIGHT | CLIMB 300ft<br />DESCEND 300ft |\n"
+
+	pdffile := path.Join("./testdata/", "TableInsideListItem.pdf")
+	tracerfile := path.Join("./testdata/", "TableInsideListItem.log")
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdffile, TracerFile: tracerfile, Theme: LIGHT,
+	})
+	// CommonExtensions как в конвертере
+	r.Extensions = parser.CommonExtensions
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // minPNG генерирует минимальный PNG 2x2 пикселя.
 func minPNG(t *testing.T) []byte {
 	t.Helper()

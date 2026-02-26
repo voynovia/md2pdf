@@ -22,6 +22,7 @@ package mdtopdf
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -460,6 +461,36 @@ func (r *PdfRenderer) Process(content []byte) error {
 	return nil
 }
 
+// preprocessTables убирает ведущий whitespace у строк, являющихся частью
+// таблицы (начинаются с '|' после trim). Это позволяет парсеру распознавать
+// таблицы с отступом внутри list items, где gomarkdown их иначе игнорирует.
+// Строки внутри fenced code blocks не затрагиваются.
+func preprocessTables(content []byte) []byte {
+	lines := bytes.Split(content, []byte("\n"))
+	inFence := false
+	changed := false
+	for i, line := range lines {
+		trimmed := bytes.TrimLeft(line, " \t")
+		if bytes.HasPrefix(trimmed, []byte("```")) {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		// Строка с indent + pipe — потенциальная строка таблицы.
+		// Не трогаем строки без отступа (уже корректны для парсера).
+		if len(trimmed) < len(line) && len(trimmed) > 0 && trimmed[0] == '|' {
+			lines[i] = trimmed
+			changed = true
+		}
+	}
+	if !changed {
+		return content
+	}
+	return bytes.Join(lines, []byte("\n"))
+}
+
 // Run takes the markdown content, parses it but don't generate the PDF. you can access the PDF with youRenderer.Pdf
 func (r *PdfRenderer) Run(content []byte) error {
 	// Preprocess content by changing all CRLF to LF
@@ -469,6 +500,10 @@ func (r *PdfRenderer) Run(content []byte) error {
 	if r.unicodeTranslator != nil {
 		s = []byte(r.unicodeTranslator(string(s)))
 	}
+
+	// Убрать отступы у строк таблиц внутри list items,
+	// чтобы парсер мог распознать их как *ast.Table.
+	s = preprocessTables(s)
 
 	p := parser.NewWithExtensions(r.Extensions)
 	doc := markdown.Parse(s, p)
