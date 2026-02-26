@@ -252,11 +252,10 @@ func (r *PdfRenderer) processItem(node ast.ListItem, entering bool) {
 		// text/paragraphs in the item
 		r.cs.push(x)
 		if r.cs.peek().listkind == unordered {
-			tr := r.Pdf.UnicodeTranslatorFromDescriptor("")
-			bulletChar := tr("•")
+			bulletChar := "•"
 			currFontSize, _ := r.Pdf.GetFontSize()
 			if node.BulletChar != 45 { // if the bullet char is not '-'
-				bulletChar = tr("▪")
+				bulletChar = "▪"
 				r.Pdf.SetFont("", "", 25)
 			}
 			r.Pdf.CellFormat(4*r.em, r.Normal.Size+r.Normal.Spacing,
