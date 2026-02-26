@@ -20,9 +20,14 @@
 package mdtopdf
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,5 +196,55 @@ func TestTableHeaderRepeat(t *testing.T) {
 	}
 	if r.Pdf.PageCount() < 2 {
 		t.Fatalf("ожидалось минимум 2 страницы, получено %d", r.Pdf.PageCount())
+	}
+}
+
+// minPNG генерирует минимальный PNG 2x2 пикселя.
+func minPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	img.Set(1, 1, color.RGBA{B: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestImageLocalWithInputBaseURL(t *testing.T) {
+	// структура:
+	//   tmpDir/
+	//     baseDir/
+	//       assets/
+	//         test.png   ← изображение
+	tmpDir := t.TempDir()
+	baseDir := filepath.Join(tmpDir, "baseDir")
+	assetsDir := filepath.Join(baseDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetsDir, "test.png"), minPNG(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	md := []byte("# Image test\n\n![test](assets/test.png)\n")
+
+	pdfFile := filepath.Join(tmpDir, "out.pdf")
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdfFile, Theme: LIGHT,
+	})
+	r.InputBaseURL = baseDir
+	if err := r.Process(md); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(pdfFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// PDF с изображением содержит XObject (маркер встроенного изображения)
+	if !bytes.Contains(data, []byte("/XObject")) {
+		t.Error("PDF не содержит XObject — изображение не встроено")
 	}
 }

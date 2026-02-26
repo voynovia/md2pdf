@@ -368,20 +368,28 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 		tempDir := os.TempDir() + "/" + filepath.Base(os.Args[0])
 		_, err := os.Stat(destination)
 		if errors.Is(err, os.ErrNotExist) {
-			// download the image so we can use it
+			// resolve source path: prepend InputBaseURL for relative paths
 			var source string = destination
 			if !strings.HasPrefix(destination, "http") {
 				if r.InputBaseURL != "" {
 					source = r.InputBaseURL + "/" + destination
 				}
 			}
-			os.MkdirAll(tempDir, 755)
-			err := downloadFile(source, tempDir+"/"+filepath.Base(destination))
-			if err != nil {
-				fmt.Println(err.Error())
+			if !strings.HasPrefix(source, "http") {
+				// local file — use resolved path directly
+				if _, statErr := os.Stat(source); statErr == nil {
+					destination = source
+				}
 			} else {
-				destination = tempDir + "/" + filepath.Base(destination)
-				fmt.Println("Downloaded image to: " + destination)
+				// remote file — download via HTTP
+				os.MkdirAll(tempDir, 755)
+				err := downloadFile(source, tempDir+"/"+filepath.Base(destination))
+				if err != nil {
+					fmt.Println(err.Error())
+				} else {
+					destination = tempDir + "/" + filepath.Base(destination)
+					fmt.Println("Downloaded image to: " + destination)
+				}
 			}
 		}
 		mtype, err := mimetype.DetectFile(destination)
