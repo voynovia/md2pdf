@@ -618,10 +618,16 @@ func (r *PdfRenderer) renderTableRow() {
 	lineH := rowCells[0].style.Size + rowCells[0].style.Spacing
 	rowH := lineH * float64(maxLines)
 
-	// Проверка: помещается ли строка на текущей странице
+	// Проверка: помещается ли строка на текущей странице.
+	// Для заголовка — проверяем место и для минимальной строки тела,
+	// чтобы заголовок не оставался «сиротой» внизу страницы.
 	_, pageH := r.Pdf.GetPageSize()
 	_, _, _, bottomM := r.Pdf.GetMargins()
-	if r.Pdf.GetY()+rowH > pageH-bottomM {
+	checkH := rowH
+	if rowCells[0].isHeader {
+		checkH += lineH
+	}
+	if r.Pdf.GetY()+checkH > pageH-bottomM {
 		r.Pdf.AddPage()
 	}
 
