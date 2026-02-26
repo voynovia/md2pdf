@@ -618,6 +618,13 @@ func (r *PdfRenderer) renderTableRow() {
 	lineH := rowCells[0].style.Size + rowCells[0].style.Spacing
 	rowH := lineH * float64(maxLines)
 
+	// Проверка: помещается ли строка на текущей странице
+	_, pageH := r.Pdf.GetPageSize()
+	_, _, _, bottomM := r.Pdf.GetMargins()
+	if r.Pdf.GetY()+rowH > pageH-bottomM {
+		r.Pdf.AddPage()
+	}
+
 	// Начальная позиция
 	startX := r.cs.peek().leftMargin
 	startY := r.Pdf.GetY()

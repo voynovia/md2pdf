@@ -486,6 +486,7 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 	inheader := true
 	cellnum := 0
 	lengths := []float64{}
+	minWidths := []float64{}
 	textlength := float64(0)
 	ast.WalkFunc(doc, func(node ast.Node, entering bool) ast.WalkStatus {
 		switch n := node.(type) {
@@ -503,9 +504,34 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 					totalW += w
 				}
 				if totalW > usableW {
-					scale := usableW / totalW
-					for i := range lengths {
-						lengths[i] *= scale
+					// Минимум каждого столбца = ширина самого длинного слова.
+					// Оставшееся пространство распределяется пропорционально.
+					totalMinW := 0.0
+					for _, mw := range minWidths {
+						totalMinW += mw
+					}
+					if totalMinW >= usableW {
+						// Даже минимумы не помещаются — равное распределение
+						equalW := usableW / float64(len(lengths))
+						for i := range lengths {
+							lengths[i] = equalW
+						}
+					} else {
+						remainingW := usableW - totalMinW
+						totalExtra := 0.0
+						for i, w := range lengths {
+							if extra := w - minWidths[i]; extra > 0 {
+								totalExtra += extra
+							}
+						}
+						for i := range lengths {
+							extra := lengths[i] - minWidths[i]
+							if extra > 0 && totalExtra > 0 {
+								lengths[i] = minWidths[i] + remainingW*(extra/totalExtra)
+							} else {
+								lengths[i] = minWidths[i]
+							}
+						}
 					}
 				}
 				columnWidths[node] = lengths
@@ -515,6 +541,7 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			inheader = entering
 			if entering {
 				lengths = []float64{}
+				minWidths = []float64{}
 			}
 		case *ast.TableRow:
 			if entering {
@@ -524,6 +551,7 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			if entering {
 				if inheader {
 					lengths = append(lengths, 0)
+					minWidths = append(minWidths, 0)
 				}
 			} else {
 				textlength += textlength * 0.2
@@ -537,8 +565,17 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			}
 		case *ast.Text:
 			if entering && intable {
-				l := r.Pdf.GetStringWidth(string(n.Literal))
+				text := string(n.Literal)
+				l := r.Pdf.GetStringWidth(text)
 				textlength += l
+				// Отслеживать ширину самого длинного слова для минимума столбца
+				for _, word := range strings.Fields(text) {
+					ww := r.Pdf.GetStringWidth(word)
+					ww += ww * 0.2 // тот же 20% запас, что и для натуральных ширин
+					if cellnum < len(minWidths) && ww > minWidths[cellnum] {
+						minWidths[cellnum] = ww
+					}
+				}
 			}
 		}
 		return ast.GoToNext
