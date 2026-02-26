@@ -594,16 +594,10 @@ func (r *PdfRenderer) processHTMLBlock(node ast.Node) {
 	r.cr()
 }
 
-// renderTableRow рендерит буферизированную строку таблицы с word wrap.
-// Все ячейки строки рендерятся с одинаковой высотой (максимальной из всех).
-func (r *PdfRenderer) renderTableRow() {
-	if len(rowCells) == 0 {
-		return
-	}
-
-	// Фаза 1: вычислить макс. количество строк
+// rowHeight вычисляет высоту строки текста и общую высоту строки таблицы.
+func (r *PdfRenderer) rowHeight(cells []cellContent) (lineH, rowH float64) {
 	maxLines := 1
-	for i, cell := range rowCells {
+	for i, cell := range cells {
 		if i >= len(cellwidths) {
 			break
 		}
@@ -613,63 +607,80 @@ func (r *PdfRenderer) renderTableRow() {
 			maxLines = len(lines)
 		}
 	}
+	lineH = cells[0].style.Size + cells[0].style.Spacing
+	rowH = lineH * float64(maxLines)
+	return lineH, rowH
+}
 
-	// Высота строки текста и общая высота строки таблицы
-	lineH := rowCells[0].style.Size + rowCells[0].style.Spacing
-	rowH := lineH * float64(maxLines)
-
-	// Проверка: помещается ли строка на текущей странице.
-	// Для заголовка — проверяем место и для минимальной строки тела,
-	// чтобы заголовок не оставался «сиротой» внизу страницы.
-	_, pageH := r.Pdf.GetPageSize()
-	_, _, _, bottomM := r.Pdf.GetMargins()
-	checkH := rowH
-	if rowCells[0].isHeader {
-		checkH += lineH
-	}
-	if r.Pdf.GetY()+checkH > pageH-bottomM {
-		r.Pdf.AddPage()
-	}
-
-	// Начальная позиция
+// renderCells рендерит набор ячеек как строку таблицы.
+func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFill bool) {
 	startX := r.cs.peek().leftMargin
 	startY := r.Pdf.GetY()
-
-	// Фаза 2: рендеринг каждой ячейки
 	x := startX
-	for i, cell := range rowCells {
+	for i, cell := range cells {
 		if i >= len(cellwidths) {
 			break
 		}
 		w := cellwidths[i]
 		r.setStyler(cell.style)
-
-		// Фон ячейки
-		if cell.isHeader || fill {
+		if cell.isHeader || isFill {
 			r.Pdf.Rect(x, startY, w, rowH, "F")
 		}
-
-		// Границы ячейки
 		if cell.isHeader {
 			r.Pdf.Rect(x, startY, w, rowH, "D")
 		} else {
 			r.Pdf.Line(x, startY, x, startY+rowH)
 			r.Pdf.Line(x+w, startY, x+w, startY+rowH)
 		}
-
-		// Текст ячейки (MultiCell с word wrap, без border/fill — уже нарисованы)
 		r.Pdf.SetXY(x, startY)
 		align := ""
 		if cell.isHeader {
 			align = "C"
 		}
 		r.Pdf.MultiCell(w, lineH, cell.text, "", align, false)
-
 		x += w
 	}
-
-	// Переместить курсор под строку
 	r.Pdf.SetXY(startX, startY+rowH)
+}
+
+// renderTableRow рендерит буферизированную строку таблицы с word wrap.
+// Все ячейки строки рендерятся с одинаковой высотой (максимальной из всех).
+func (r *PdfRenderer) renderTableRow() {
+	if len(rowCells) == 0 {
+		return
+	}
+
+	lineH, rowH := r.rowHeight(rowCells)
+	_, pageH := r.Pdf.GetPageSize()
+	_, _, _, bottomM := r.Pdf.GetMargins()
+
+	if rowCells[0].isHeader {
+		// Orphan prevention: заголовок + минимум одна строка тела
+		bodyLineH := r.TBody.Size + r.TBody.Spacing
+		if r.Pdf.GetY()+rowH+bodyLineH > pageH-bottomM {
+			r.Pdf.AddPage()
+		}
+		// Сохранить заголовок для повторения при page break
+		headerCells = make([]cellContent, len(rowCells))
+		copy(headerCells, rowCells)
+	} else if r.Pdf.GetY()+rowH > pageH-bottomM {
+		// Замыкающая линия таблицы перед page break
+		wSum := 0.0
+		for _, w := range cellwidths {
+			wSum += w
+		}
+		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
+
+		// Строка тела не помещается — новая страница с повторным заголовком
+		r.Pdf.AddPage()
+		if len(headerCells) > 0 {
+			hLineH, hRowH := r.rowHeight(headerCells)
+			r.renderCells(headerCells, hLineH, hRowH, false)
+			fill = false
+		}
+	}
+
+	r.renderCells(rowCells, lineH, rowH, fill)
 }
 
 func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
@@ -681,6 +692,7 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		r.cr()
 		r.cs.push(x)
 		fill = false
+		headerCells = nil
 		cellwidths = r.ColumnWidths[node]
 	} else {
 		wSum := 0.0

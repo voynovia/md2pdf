@@ -20,11 +20,13 @@
 package mdtopdf
 
 import (
-	"github.com/gomarkdown/markdown/parser"
+	"fmt"
 	"os"
 	"path"
 	"strings"
 	"testing"
+
+	"github.com/gomarkdown/markdown/parser"
 )
 
 func testit(inputf string, gohighlight bool, t *testing.T) {
@@ -167,4 +169,27 @@ func TestLinksShortcut(t *testing.T) {
 
 func TestTidyness(t *testing.T) {
 	testit("Tidyness.text", false, t)
+}
+
+func TestTableHeaderRepeat(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("| Header A | Header B | Header C |\n")
+	sb.WriteString("|----------|----------|----------|\n")
+	for i := range 80 {
+		fmt.Fprintf(&sb, "| Row %d A | Row %d B | Row %d C |\n", i, i, i)
+	}
+
+	pdffile := path.Join("./testdata/", "TableHeaderRepeat.pdf")
+	tracerfile := path.Join("./testdata/", "TableHeaderRepeat.log")
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdffile, TracerFile: tracerfile, Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	if err := r.Process([]byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	if r.Pdf.PageCount() < 2 {
+		t.Fatalf("ожидалось минимум 2 страницы, получено %d", r.Pdf.PageCount())
+	}
 }

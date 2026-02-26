@@ -46,6 +46,9 @@ type cellContent struct {
 // rowCells — буфер ячеек текущей строки таблицы.
 var rowCells []cellContent
 
+// headerCells — сохранённые ячейки заголовка для повторения при page break.
+var headerCells []cellContent
+
 func (n listType) String() string {
 	switch n {
 	case notlist:
