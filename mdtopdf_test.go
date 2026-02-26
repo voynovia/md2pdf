@@ -199,6 +199,61 @@ func TestTableHeaderRepeat(t *testing.T) {
 	}
 }
 
+// TestTableEmptyHeader проверяет таблицу с пустой первой ячейкой заголовка и <br /> в body cells.
+func TestTableEmptyHeader(t *testing.T) {
+	md := `|                         | Deviation >10NM | Level change                   |
+| ----------------------- | --------------- | ------------------------------ |
+| EAST 000-179 magnetic | LEFT | DESCEND 300ft |
+| WEST 180-359 magnetic | RIGHT | CLIMB 300ft |
+`
+	pdffile := path.Join("./testdata/", "TableEmptyHeader.pdf")
+	tracerfile := path.Join("./testdata/", "TableEmptyHeader.log")
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdffile, TracerFile: tracerfile, Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTableEmptyHeaderBR проверяет таблицу с пустой первой ячейкой заголовка и <br /> в body cells.
+func TestTableEmptyHeaderBR(t *testing.T) {
+	md := "|                         | Deviation >10NM | Level change                   |\n" +
+		"| ----------------------- | --------------- | ------------------------------ |\n" +
+		"| EAST 000-179 magnetic | LEFT<br />RIGHT | DESCEND 300ft<br />CLIMB 300ft |\n" +
+		"| WEST 180-359 magnetic | LEFT<br />RIGHT | CLIMB 300ft<br />DESCEND 300ft |\n"
+
+	pdffile := path.Join("./testdata/", "TableEmptyHeaderBR.pdf")
+	tracerfile := path.Join("./testdata/", "TableEmptyHeaderBR.log")
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdffile, TracerFile: tracerfile, Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMathInline проверяет, что $...$ не вызывает "Unknown node type: *ast.Math".
+func TestMathInline(t *testing.T) {
+	md := "Possession of a minimum of $100 + US $50 per person per day.\n"
+
+	pdffile := path.Join("./testdata/", "MathInline.pdf")
+	tracerfile := path.Join("./testdata/", "MathInline.log")
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: pdffile, TracerFile: tracerfile, Theme: LIGHT,
+	})
+	// CommonExtensions включает MathJax — используем их чтобы воспроизвести баг
+	r.Extensions = parser.CommonExtensions
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // minPNG генерирует минимальный PNG 2x2 пикселя.
 func minPNG(t *testing.T) []byte {
 	t.Helper()

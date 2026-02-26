@@ -82,10 +82,16 @@ func (r *PdfRenderer) processText(node *ast.Text) {
 	}
 }
 
-// This is a stub implementation. For now, the MathAjax extension is disabled.
+// processMath выводит literal-текст из MathJax-узла.
+// MathJax включён в CommonExtensions, поэтому $100 парсится как *ast.Math.
 func (r *PdfRenderer) processMath(node *ast.Math) {
 	currentStyle := r.cs.peek().textStyle
 	s := string(node.Literal)
+	if incell {
+		r.cs.peek().cellInnerString += s
+		r.cs.peek().cellInnerStringStyle = &currentStyle
+		return
+	}
 	r.write(currentStyle, s)
 }
 
@@ -592,6 +598,22 @@ func (r *PdfRenderer) processHorizontalRule(node ast.Node) {
 		// another newline
 		r.cr()
 	}
+}
+
+// processHTMLSpan обрабатывает inline HTML.
+// Для <br /> внутри ячейки таблицы — добавляет перенос строки в cellInnerString.
+func (r *PdfRenderer) processHTMLSpan(node *ast.HTMLSpan) {
+	literal := strings.TrimSpace(strings.ToLower(string(node.Literal)))
+	isBR := literal == "<br>" || literal == "<br/>" || literal == "<br />"
+	if isBR && incell {
+		r.cs.peek().cellInnerString += "\n"
+		return
+	}
+	if isBR {
+		r.cr()
+		return
+	}
+	r.tracer("HTMLSpan", string(node.Literal))
 }
 
 func (r *PdfRenderer) processHTMLBlock(node ast.Node) {

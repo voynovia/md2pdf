@@ -659,7 +659,7 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 			r.tracer("DEL (leaving)", "Not handled")
 		}
 	case *ast.HTMLSpan:
-		r.tracer("HTMLSpan", "Not handled")
+		r.processHTMLSpan(node)
 	case *ast.Link:
 		r.processLink(*node, entering)
 	case *ast.Image:
@@ -694,8 +694,8 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 		r.processTableRow(node, entering)
 	case *ast.TableCell:
 		r.processTableCell(*node, entering)
-	/*case *ast.Math:
-	r.processMath(node)*/
+	case *ast.Math:
+		r.processMath(node)
 	default:
 		fmt.Printf("Unknown node type: %T. Skipping\n", node)
 	}
