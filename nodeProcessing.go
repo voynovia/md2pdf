@@ -439,9 +439,20 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 		var imgPath = destination
 		_, err = os.Stat(imgPath)
 		if err == nil {
+			imgType := ""
+			if mtype != nil {
+				switch {
+				case mtype.Is("image/png"):
+					imgType = "png"
+				case mtype.Is("image/jpeg"):
+					imgType = "jpg"
+				case mtype.Is("image/gif"):
+					imgType = "gif"
+				}
+			}
 			r.Pdf.ImageOptions(destination,
 				-1, 0, 0, 0, true,
-				fpdf.ImageOptions{ImageType: "", ReadDpi: true}, 0, "")
+				fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}, 0, "")
 		} else {
 			r.tracer("Image (file error)", err.Error())
 		}
