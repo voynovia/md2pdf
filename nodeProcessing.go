@@ -683,6 +683,14 @@ func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFi
 	startX := r.cs.peek().leftMargin
 	startY := r.Pdf.GetY()
 	x := startX
+
+	// Цвет границ таблицы: видимый на текущем фоне.
+	if r.isBackgroundDark() {
+		r.Pdf.SetDrawColor(100, 100, 100)
+	} else {
+		r.Pdf.SetDrawColor(200, 200, 200)
+	}
+
 	for i, cell := range cells {
 		if i >= len(cellwidths) {
 			break
