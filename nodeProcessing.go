@@ -450,9 +450,23 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 					imgType = "gif"
 				}
 			}
-			r.Pdf.ImageOptions(destination,
-				-1, 0, 0, 0, true,
-				fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}, 0, "")
+			imgOpts := fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}
+			info := r.Pdf.RegisterImageOptions(destination, imgOpts)
+			if info != nil {
+				pageW, _ := r.Pdf.GetPageSize()
+				lm, _, rm, _ := r.Pdf.GetMargins()
+				contentW := pageW - lm - rm
+
+				// Scale down images that exceed content width.
+				var w float64
+				if info.Width() > contentW {
+					w = contentW
+				}
+
+				r.Pdf.ImageOptions(destination,
+					-1, 0, w, 0, true,
+					imgOpts, 0, "")
+			}
 		} else {
 			r.tracer("Image (file error)", err.Error())
 		}
