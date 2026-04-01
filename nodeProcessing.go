@@ -450,6 +450,16 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 					imgType = "gif"
 				}
 			}
+			// Для тёмной темы — инвертировать яркость изображения.
+			if r.Theme == DARK || r.Theme == CUSTOM && r.isBackgroundDark() {
+				os.MkdirAll(tempDir, 0o755)
+				darkPath := tempDir + "/dark_" + filepath.Base(destination)
+				if err := invertLightness(destination, darkPath); err == nil {
+					destination = darkPath
+					imgType = "png" // invertLightness всегда выводит PNG
+				}
+			}
+
 			imgOpts := fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}
 			info := r.Pdf.RegisterImageOptions(destination, imgOpts)
 			if info != nil {
