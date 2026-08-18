@@ -237,6 +237,90 @@ func TestTableEmptyHeaderBR(t *testing.T) {
 	}
 }
 
+// TestLandscapeWideTable проверяет разворот страницы под широкую таблицу:
+// таблица шире полосы набора уезжает на альбомную страницу, документ после
+// неё возвращается в портрет, а узкая таблица ориентацию не меняет.
+func TestLandscapeWideTable(t *testing.T) {
+	wide := "Текст до таблицы.\n\n" +
+		"| Название станции | Позывной | Частота | Период передачи | Часы работы | Аэродромы | Содержание сводок |\n" +
+		"| --- | --- | --- | --- | --- | --- | --- |\n" +
+		"| Чита Chita | Чита-Волмет Chita-Volmet | 128300 | Непрерывно Continuously | H24 | Чита, Кадала, Улан-Удэ, Мухино | METAR с прогнозом TREND |\n" +
+		"| Иркутск Irkutsk | Иркутск-Волмет Irkutsk-Volmet | 125475 | Непрерывно Continuously | H24 | Иркутск, Чита, Кадала, Улан-Удэ | METAR and TREND |\n\n" +
+		"Текст после таблицы.\n"
+
+	narrow := "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+
+	tests := []struct {
+		name          string
+		md            string
+		wantLandscape bool
+	}{
+		{"wide", wide, true},
+		{"narrow", narrow, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pdffile := path.Join("./testdata/", "Landscape"+tc.name+".pdf")
+
+			r := NewPdfRenderer(PdfRendererParams{PdfFile: pdffile, Theme: LIGHT})
+			r.Extensions = parser.Tables
+			r.LandscapeWideTables = true
+			if err := r.Process([]byte(tc.md)); err != nil {
+				t.Fatal(err)
+			}
+
+			gotLandscape := false
+			for page := 1; page <= r.Pdf.PageCount(); page++ {
+				wd, ht, _ := r.Pdf.PageSize(page)
+				if wd > ht {
+					gotLandscape = true
+				}
+			}
+			if gotLandscape != tc.wantLandscape {
+				t.Fatalf("альбомная страница: получено %v, ожидалось %v", gotLandscape, tc.wantLandscape)
+			}
+
+			// документ обязан заканчиваться портретной страницей
+			wd, ht, _ := r.Pdf.PageSize(r.Pdf.PageCount())
+			if wd > ht {
+				t.Fatalf("последняя страница альбомная: %vx%v", wd, ht)
+			}
+		})
+	}
+}
+
+// TestLandscapeAdjacentTables проверяет, что между двумя широкими таблицами
+// подряд не появляется пустая портретная страница.
+func TestLandscapeAdjacentTables(t *testing.T) {
+	row := "| Название станции | Позывной радиостанции | Частота передачи | Период радиовещания | Часы работы органа | Аэродромы и районы | Содержание сводок |\n"
+	md := "Текст до таблиц.\n\n" +
+		row + "| --- | --- | --- | --- | --- | --- | --- |\n" + row + "\n" +
+		row + "| --- | --- | --- | --- | --- | --- | --- |\n" + row
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: path.Join("./testdata/", "LandscapeAdjacent.pdf"), Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	r.LandscapeWideTables = true
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+
+	orientations := make([]string, 0, r.Pdf.PageCount())
+	for page := 1; page <= r.Pdf.PageCount(); page++ {
+		wd, ht, _ := r.Pdf.PageSize(page)
+		if wd > ht {
+			orientations = append(orientations, "L")
+			continue
+		}
+		orientations = append(orientations, "P")
+	}
+	if got := strings.Join(orientations, ""); got != "PLL" {
+		t.Fatalf("ориентации страниц: получено %q, ожидалось \"PLL\"", got)
+	}
+}
+
 // TestMathInline проверяет, что $...$ не вызывает "Unknown node type: *ast.Math".
 func TestMathInline(t *testing.T) {
 	md := "Possession of a minimum of $100 + US $50 per person per day.\n"
