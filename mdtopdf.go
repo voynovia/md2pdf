@@ -28,6 +28,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"unicode/utf8"
 
 	"strings"
 
@@ -140,6 +141,10 @@ type PdfRenderer struct {
 	inLandscape bool
 	// альбомная страница дозаполняется обычным потоком после таблицы
 	landscapeTail bool
+	// блоки, которые стоит забрать на альбомную страницу перед таблицей
+	landscapePrelude map[ast.Node]bool
+	// рендерится блок из такого преддверия
+	inPrelude bool
 	// разрыв страницы запрещён: идёт замыкающая линия таблицы нулевой высоты
 	suppressBreak bool
 
@@ -525,6 +530,7 @@ func (r *PdfRenderer) Run(content []byte) error {
 	doc := markdown.Parse(s, p)
 
 	setColumnWidths(doc, r)
+	markLandscapePreludes(doc, r)
 	_ = markdown.Render(doc, r)
 	// футер последней страницы рисуется при закрытии документа — поле полосы
 	// набора к этому моменту обязано быть обычным
@@ -652,6 +658,61 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 	r.landscapeTables = landscapeTables
 }
 
+// landscapePreludeBudget — сколько знаков текста перед широкой таблицей стоит
+// забрать на её альбомную страницу. Больше — и текст занял бы страницу целиком,
+// не оставив места самой таблице.
+const landscapePreludeBudget = 1500
+
+// markLandscapePreludes отмечает блоки, которые уедут на альбомную страницу
+// вместе с идущей за ними широкой таблицей. Ориентация страницы выбирается в
+// момент её начала, поэтому текст перед таблицей иначе остаётся на портретной
+// странице, обрывает её на середине и оставляет пустоту до самого низа: сама
+// таблица портретную страницу дописать уже не может.
+//
+// Назад от таблицы отбираются подряд идущие блоки, пока их суммарный объём
+// держится в бюджете; таблица, горизонтальная линия или превышение бюджета
+// прекращают отбор.
+func markLandscapePreludes(doc ast.Node, r *PdfRenderer) {
+	prelude := map[ast.Node]bool{}
+	children := doc.GetChildren()
+	for i, node := range children {
+		table, ok := node.(*ast.Table)
+		if !ok || !r.landscapeTables[table] {
+			continue
+		}
+		budget := landscapePreludeBudget
+		for j := i - 1; j >= 0; j-- {
+			switch children[j].(type) {
+			case *ast.Table, *ast.HorizontalRule:
+				j = -1
+				continue
+			}
+			size := blockTextLen(children[j])
+			if size > budget {
+				break
+			}
+			budget -= size
+			prelude[children[j]] = true
+		}
+	}
+	r.landscapePrelude = prelude
+}
+
+// blockTextLen — грубая оценка объёма блока: знаки его текста плюс надбавка на
+// сам блок (отбивка, маркеры, заголовок).
+func blockTextLen(node ast.Node) int {
+	n := 40
+	ast.WalkFunc(node, func(nd ast.Node, entering bool) ast.WalkStatus {
+		if entering {
+			if t, ok := nd.(*ast.Text); ok {
+				n += utf8.RuneCount(t.Literal)
+			}
+		}
+		return ast.GoToNext
+	})
+	return n
+}
+
 // wantsLandscape сообщает, нужна ли таблице альбомная страница. Разворот
 // стоит документу разрыва страницы и пустого места до и после таблицы,
 // поэтому его заслуживает лишь та таблица, которой портретная полоса
@@ -680,6 +741,7 @@ func (r *PdfRenderer) addPageOriented(orientation string) {
 // разворачивается только один раз на группу: соседняя широкая таблица и текст
 // между ними продолжаются на той же странице. Сообщает, начата ли страница.
 func (r *PdfRenderer) enterLandscape() bool {
+	r.inPrelude = false
 	r.landscapeTail = false
 	r.Pdf.SetRightMargin(r.mright)
 	if r.inLandscape {
@@ -738,6 +800,14 @@ func (r *PdfRenderer) acceptPageBreak() bool {
 		return false
 	}
 	if !r.landscapeTail {
+		if r.inPrelude && !r.inLandscape {
+			// страница, на которой окажется только текст перед широкой
+			// таблицей, сразу открывается альбомной — таблица продолжит её
+			r.addPageOriented("L")
+			r.inLandscape = true
+			r.beginLandscapeTail()
+			return false
+		}
 		auto, _ := r.Pdf.GetAutoPageBreak()
 		return auto
 	}
@@ -834,6 +904,10 @@ func (r *PdfRenderer) writeLink(s Styler, display, url string) {
 // traversal to the next node.
 // (above taken verbatim from the blackfriday v2 package)
 func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
+	if entering && r.landscapePrelude[node] {
+		r.inPrelude = true
+	}
+
 	switch node := node.(type) {
 	case *ast.Text:
 		r.processText(node)
