@@ -140,6 +140,8 @@ type PdfRenderer struct {
 	inLandscape bool
 	// альбомная страница дозаполняется обычным потоком после таблицы
 	landscapeTail bool
+	// разрыв страницы запрещён: идёт замыкающая линия таблицы нулевой высоты
+	suppressBreak bool
 
 	tocLinks map[string]*int
 }
@@ -552,10 +554,15 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 				for _, w := range lengths {
 					totalW += w
 				}
-				// Минимум каждого столбца = ширина самого длинного слова.
+				// Минимум каждого столбца = ширина самого длинного слова
+				// плюс поля ячейки: без них столбец шириной ровно в слово
+				// рвёт его по буквам, и «портрет справляется» оказывается
+				// ложью для таблиц из коротких слов.
+				cellPad := 2 * r.Pdf.GetCellMargin()
 				totalMinW := 0.0
-				for _, mw := range minWidths {
-					totalMinW += mw
+				for i := range minWidths {
+					minWidths[i] += cellPad
+					totalMinW += minWidths[i]
 				}
 				// широкая таблица получает альбомную страницу и
 				// масштабируется уже под её полосу
@@ -674,6 +681,9 @@ func (r *PdfRenderer) enterLandscape() bool {
 	}
 	r.addPageOriented("L")
 	r.inLandscape = true
+	// Перехватчик остаётся до конца документа и вне хвоста разрешает разрыв
+	// всегда: потребитель, выключивший авто-разрыв через SetAutoPageBreak,
+	// после первой широкой таблицы получит его обратно.
 	r.Pdf.SetAcceptPageBreakFunc(r.acceptPageBreak)
 	return true
 }
@@ -697,7 +707,9 @@ func (r *PdfRenderer) leaveLandscape() {
 	r.Pdf.SetRightMargin(r.mright)
 }
 
-// acceptPageBreak решает судьбу автоматического разрыва страницы. Пока
+// acceptPageBreak решает судьбу автоматического разрыва страницы. Замыкающая
+// линия таблицы имеет нулевую высоту и разрыва не стоит: страница под неё —
+// пустая страница. Пока
 // альбомная страница дозаполняется текстом, разрыв означает, что место
 // кончилось: fpdf добавил бы ещё одну альбомную, поэтому портретную страницу
 // заводим сами и разрыв отклоняем.
@@ -712,11 +724,23 @@ func (r *PdfRenderer) leaveLandscape() {
 //	    D --> E[разрыв отклонить: пишем на новой странице]
 //	```
 func (r *PdfRenderer) acceptPageBreak() bool {
+	if r.suppressBreak {
+		return false
+	}
 	if !r.landscapeTail {
 		return true
 	}
+	// Родной путь разрыва (fpdf.go, CellFormat) сохраняет позицию строки и
+	// гасит межсловный интервал перед новой страницей: оператор Tw живёт в
+	// потоке страницы, поэтому на уходящей странице он обязан закрыться, иначе
+	// растянутые пробелы достанутся её футеру. Перехват обязан повторить это
+	// сам — иначе fpdf сделал бы всю уборку, но развернул бы ещё одну
+	// альбомную страницу.
+	x := r.Pdf.GetX()
+	r.Pdf.SetWordSpacing(0)
 	r.leaveLandscape()
 	r.addPageOriented("P")
+	r.Pdf.SetX(x)
 	return false
 }
 

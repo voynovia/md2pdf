@@ -611,7 +611,7 @@ func (r *PdfRenderer) processHeading(node ast.Heading, entering bool) {
 func (r *PdfRenderer) processHorizontalRule(node ast.Node) {
 	r.tracer("HorizontalRule", "")
 	if r.HorizontalRuleNewPage {
-		r.Pdf.AddPage()
+		r.addPage()
 	} else {
 		// do a newline
 		r.cr()
@@ -800,14 +800,23 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		for _, w := range cellwidths {
 			wSum += w
 		}
+		// Замыкающая линия и перевод строки после таблицы разрыва не стоят:
+		// у нижнего края они заводят страницу под одну черту, а если за
+		// таблицей ничего нет — просто пустую. Страницу заведёт первый же
+		// настоящий блок текста, когда упрётся в нижний край.
+		r.suppressBreak = true
 		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
 
 		r.cs.pop()
 		r.tracer("Table (leaving)", "")
-		r.cr()
+		// Хвост включается ДО перевода строки: иначе перевод пробил бы разрыв
+		// с выключенным хвостом и документ получил бы ещё одну альбомную
+		// страницу под один абзац.
 		if r.inLandscape {
 			r.beginLandscapeTail()
 		}
+		r.cr()
+		r.suppressBreak = false
 	}
 }
 
