@@ -550,19 +550,21 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 				pageW, pageH := r.Pdf.GetPageSize()
 				_, _, rightM, _ := r.Pdf.GetMargins()
 				usableW := pageW - r.mleft - rightM
-				totalW := 0.0
-				for _, w := range lengths {
-					totalW += w
-				}
 				// Минимум каждого столбца = ширина самого длинного слова
-				// плюс поля ячейки: без них столбец шириной ровно в слово
-				// рвёт его по буквам, и «портрет справляется» оказывается
-				// ложью для таблиц из коротких слов.
+				// плюс поля ячейки. Это одновременно нижняя граница ширины
+				// столбца: колонка уже минимума рвёт слово по буквам, что
+				// портит даже таблицу, которая целиком помещается в полосу.
 				cellPad := 2 * r.Pdf.GetCellMargin()
-				totalMinW := 0.0
-				for i := range minWidths {
-					minWidths[i] += cellPad
-					totalMinW += minWidths[i]
+				totalW, totalMinW := 0.0, 0.0
+				for i := range lengths {
+					if i < len(minWidths) {
+						minWidths[i] += cellPad
+						if lengths[i] < minWidths[i] {
+							lengths[i] = minWidths[i]
+						}
+						totalMinW += minWidths[i]
+					}
+					totalW += lengths[i]
 				}
 				// широкая таблица получает альбомную страницу и
 				// масштабируется уже под её полосу
@@ -737,10 +739,16 @@ func (r *PdfRenderer) acceptPageBreak() bool {
 	// сам — иначе fpdf сделал бы всю уборку, но развернул бы ещё одну
 	// альбомную страницу.
 	x := r.Pdf.GetX()
-	r.Pdf.SetWordSpacing(0)
+	ws := r.Pdf.GetWordSpacing()
+	if ws != 0 {
+		r.Pdf.SetWordSpacing(0)
+	}
 	r.leaveLandscape()
 	r.addPageOriented("P")
 	r.Pdf.SetX(x)
+	if ws != 0 {
+		r.Pdf.SetWordSpacing(ws)
+	}
 	return false
 }
 

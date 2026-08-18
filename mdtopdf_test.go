@@ -335,6 +335,43 @@ func TestLandscapeAdjacentTables(t *testing.T) {
 	}
 }
 
+// TestColumnMinWidthFitsWord проверяет, что столбец не уже самого длинного
+// своего слова вместе с полями ячейки, которые fpdf вычитает из ширины при
+// выводе текста. Более узкая колонка рвёт слово по буквам — таблица из
+// коротких слов раньше выходила именно так, даже когда целиком помещалась в
+// полосу набора и масштабирование столбцов не включалось.
+func TestColumnMinWidthFitsWord(t *testing.T) {
+	const word = "MM"
+	cols := 8
+	header := "|"
+	sep := "|"
+	body := "|"
+	for i := 0; i < cols; i++ {
+		header += " h |"
+		sep += " --- |"
+		body += " " + word + " |"
+	}
+	md := header + "\n" + sep + "\n" + body + "\n"
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: path.Join("./testdata/", "ColumnMinWidth.pdf"), Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+
+	r.setStyler(r.Normal)
+	want := r.Pdf.GetStringWidth(word) + 2*r.Pdf.GetCellMargin()
+	for _, widths := range r.ColumnWidths {
+		for i, w := range widths {
+			if w < want {
+				t.Errorf("столбец %d шириной %.2f уже слова с полями ячейки %.2f — слово порвётся по буквам", i, w, want)
+			}
+		}
+	}
+}
+
 // TestLandscapeTailFlow проверяет дозаполнение альбомной страницы: текст после
 // широкой таблицы продолжается на ней же, а когда место кончается, документ
 // возвращается в портрет — вторая альбомная страница под текст не заводится.
