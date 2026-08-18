@@ -618,11 +618,11 @@ func (r *PdfRenderer) processHorizontalRule(node ast.Node) {
 		// get the current x and y (assume left margin in ok)
 		x, y := r.Pdf.GetXY()
 		// get the page margins
-		lm, _, _, _ := r.Pdf.GetMargins()
+		_, _, rm, _ := r.Pdf.GetMargins()
 		// get the page size
 		w, _ := r.Pdf.GetPageSize()
-		// now compute the x value of the right side of page
-		newx := w - lm
+		// now compute the x value of the right side of the text column
+		newx := w - rm
 		r.tracer("... From X,Y", fmt.Sprintf("%v,%v", x, y))
 		r.Pdf.MoveTo(x, y)
 		r.tracer("...   To X,Y", fmt.Sprintf("%v,%v", newx, y))
@@ -775,13 +775,14 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		x := &containerState{
 			textStyle: r.THeader, listkind: notlist,
 			leftMargin: r.cs.peek().leftMargin}
-		r.cr()
-		// Альбомная страница нужна только первой таблице группы: соседняя
-		// широкая таблица продолжается на той же странице, а её перенос
-		// оставит r.addPage в альбоме.
-		if r.landscapeTables[node] && !r.inLandscape {
-			r.addPageOriented("L")
-			r.inLandscape = true
+		// Разворот идёт ДО перевода строки: перевод на дозаполняемой
+		// альбомной странице мог бы сам утянуть документ обратно в портрет.
+		if r.landscapeTables[node] {
+			if !r.enterLandscape() {
+				r.cr()
+			}
+		} else {
+			r.cr()
 		}
 		r.cs.push(x)
 		fill = false
@@ -805,7 +806,7 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		r.tracer("Table (leaving)", "")
 		r.cr()
 		if r.inLandscape {
-			r.pendingPortrait = true
+			r.beginLandscapeTail()
 		}
 	}
 }

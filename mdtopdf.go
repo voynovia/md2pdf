@@ -138,8 +138,8 @@ type PdfRenderer struct {
 	landscapeTables map[ast.Node]bool
 	// признак того, что текущая страница развёрнута под таблицу
 	inLandscape bool
-	// возврат в портрет отложен до следующего узла документа
-	pendingPortrait bool
+	// альбомная страница дозаполняется обычным потоком после таблицы
+	landscapeTail bool
 
 	tocLinks map[string]*int
 }
@@ -520,6 +520,9 @@ func (r *PdfRenderer) Run(content []byte) error {
 
 	setColumnWidths(doc, r)
 	_ = markdown.Render(doc, r)
+	// футер последней страницы рисуется при закрытии документа — поле полосы
+	// набора к этому моменту обязано быть обычным
+	r.Pdf.SetRightMargin(r.mright)
 
 	return nil
 }
@@ -660,31 +663,78 @@ func (r *PdfRenderer) addPageOriented(orientation string) {
 	r.Pdf.AddPageFormat(orientation, fpdf.SizeType{Wd: wd, Ht: ht})
 }
 
-// restorePortrait возвращает документ в портрет перед первым узлом после
-// альбомной таблицы. Возврат отложен намеренно: закончился документ или следом
-// идёт ещё одна альбомная таблица — лишняя пустая портретная страница
-// не появляется.
-func (r *PdfRenderer) restorePortrait(node ast.Node, entering bool) {
-	if !entering || !r.pendingPortrait {
-		return
+// enterLandscape отдаёт широкой таблице всю альбомную полосу. Страница
+// разворачивается только один раз на группу: соседняя широкая таблица и текст
+// между ними продолжаются на той же странице. Сообщает, начата ли страница.
+func (r *PdfRenderer) enterLandscape() bool {
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+	if r.inLandscape {
+		return false
 	}
-	r.pendingPortrait = false
-	if table, ok := node.(*ast.Table); ok && r.landscapeTables[table] {
-		return
-	}
-	r.inLandscape = false
-	r.addPageOriented("P")
+	r.addPageOriented("L")
+	r.inLandscape = true
+	r.Pdf.SetAcceptPageBreakFunc(r.acceptPageBreak)
+	return true
 }
 
-// addPage начинает новую страницу, сохраняя ориентацию текущей: перенос
-// длинной таблицы обязан остаться в альбоме, иначе её столбцы, посчитанные
-// под альбомную полосу, вылезут за портретную страницу.
-func (r *PdfRenderer) addPage() {
-	if r.inLandscape {
-		r.addPageOriented("L")
-		return
+// beginLandscapeTail пускает поток дальше по альбомной странице, вместо того
+// чтобы бросать её низ пустым. Колонка текста сужается до портретной ширины:
+// строки читаются как на остальных страницах, а перенос абзаца через границу
+// страниц безопасен — полоса набора одинакова в обеих ориентациях.
+func (r *PdfRenderer) beginLandscapeTail() {
+	r.landscapeTail = true
+	pageW, pageH := r.Pdf.GetPageSize()
+	r.Pdf.SetRightMargin(pageW - pageH + r.mright)
+}
+
+// leaveLandscape возвращает документ в портрет. Правое поле восстанавливается
+// ДО новой страницы: футер уходящей альбомной страницы рисуется внутри
+// AddPageFormat и должен встать по центру всей её ширины.
+func (r *PdfRenderer) leaveLandscape() {
+	r.inLandscape = false
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+}
+
+// acceptPageBreak решает судьбу автоматического разрыва страницы. Пока
+// альбомная страница дозаполняется текстом, разрыв означает, что место
+// кончилось: fpdf добавил бы ещё одну альбомную, поэтому портретную страницу
+// заводим сами и разрыв отклоняем.
+//
+// Flow:
+//
+//	```mermaid
+//	flowchart TD
+//	    A[fpdf: место кончилось] --> B{дозаполняем альбом?}
+//	    B -- нет --> C[разрешить обычный разрыв]
+//	    B -- да --> D[вернуть поля, начать портретную]
+//	    D --> E[разрыв отклонить: пишем на новой странице]
+//	```
+func (r *PdfRenderer) acceptPageBreak() bool {
+	if !r.landscapeTail {
+		return true
 	}
-	r.Pdf.AddPage()
+	r.leaveLandscape()
+	r.addPageOriented("P")
+	return false
+}
+
+// addPage начинает новую страницу под продолжение таблицы. Перенос широкой
+// таблицы обязан остаться в альбоме, иначе её столбцы, посчитанные под
+// альбомную полосу, вылезут за портретную страницу. Обычная таблица, попавшая
+// на дозаполняемую альбомную страницу, посчитана под портретную полосу —
+// её продолжение уходит в портрет.
+func (r *PdfRenderer) addPage() {
+	switch {
+	case r.landscapeTail:
+		r.leaveLandscape()
+		r.addPageOriented("P")
+	case r.inLandscape:
+		r.addPageOriented("L")
+	default:
+		r.Pdf.AddPage()
+	}
 }
 
 // UpdateParagraphStyler - update with default styler
@@ -743,8 +793,6 @@ func (r *PdfRenderer) writeLink(s Styler, display, url string) {
 // traversal to the next node.
 // (above taken verbatim from the blackfriday v2 package)
 func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
-	r.restorePortrait(node, entering)
-
 	switch node := node.(type) {
 	case *ast.Text:
 		r.processText(node)

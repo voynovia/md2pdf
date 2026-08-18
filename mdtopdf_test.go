@@ -242,13 +242,28 @@ func TestTableEmptyHeaderBR(t *testing.T) {
 // документ после неё возвращается в портрет, а узкая и умеренно широкая
 // таблицы ориентацию не меняют — вторая переносит слова на месте, что дешевле
 // пустого места до и после разворота.
+// wideTableMD — таблица, которой мало даже альбомной полосы.
+const wideTableMD = "| Название станции | Позывной | Частота | Период передачи | Часы работы | Аэродромы | Содержание сводок |\n" +
+	"| --- | --- | --- | --- | --- | --- | --- |\n" +
+	"| Чита Chita | Чита-Волмет Chita-Volmet | 128300 | Непрерывно Continuously | H24 | Чита, Кадала, Улан-Удэ, Мухино | METAR с прогнозом TREND |\n" +
+	"| Иркутск Irkutsk | Иркутск-Волмет Irkutsk-Volmet | 125475 | Непрерывно Continuously | H24 | Иркутск, Чита, Кадала, Улан-Удэ | METAR and TREND |\n"
+
+// pageOrientations — строка ориентаций страниц готового документа: P или L.
+func pageOrientations(r *PdfRenderer) string {
+	var sb strings.Builder
+	for page := 1; page <= r.Pdf.PageCount(); page++ {
+		wd, ht, _ := r.Pdf.PageSize(page)
+		if wd > ht {
+			sb.WriteString("L")
+			continue
+		}
+		sb.WriteString("P")
+	}
+	return sb.String()
+}
+
 func TestLandscapeWideTable(t *testing.T) {
-	wide := "Текст до таблицы.\n\n" +
-		"| Название станции | Позывной | Частота | Период передачи | Часы работы | Аэродромы | Содержание сводок |\n" +
-		"| --- | --- | --- | --- | --- | --- | --- |\n" +
-		"| Чита Chita | Чита-Волмет Chita-Volmet | 128300 | Непрерывно Continuously | H24 | Чита, Кадала, Улан-Удэ, Мухино | METAR с прогнозом TREND |\n" +
-		"| Иркутск Irkutsk | Иркутск-Волмет Irkutsk-Volmet | 125475 | Непрерывно Continuously | H24 | Иркутск, Чита, Кадала, Улан-Удэ | METAR and TREND |\n\n" +
-		"Текст после таблицы.\n"
+	wide := "Текст до таблицы.\n\n" + wideTableMD + "\nТекст после таблицы.\n"
 
 	narrow := "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
 
@@ -265,10 +280,11 @@ func TestLandscapeWideTable(t *testing.T) {
 		name          string
 		md            string
 		wantLandscape bool
+		wantPages     int
 	}{
-		{"wide", wide, true},
-		{"narrow", narrow, false},
-		{"moderate", moderate, false},
+		{"wide", wide, true, 2},
+		{"narrow", narrow, false, 1},
+		{"moderate", moderate, false, 1},
 	}
 
 	for _, tc := range tests {
@@ -282,21 +298,15 @@ func TestLandscapeWideTable(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			gotLandscape := false
-			for page := 1; page <= r.Pdf.PageCount(); page++ {
-				wd, ht, _ := r.Pdf.PageSize(page)
-				if wd > ht {
-					gotLandscape = true
-				}
-			}
+			gotLandscape := strings.Contains(pageOrientations(r), "L")
 			if gotLandscape != tc.wantLandscape {
 				t.Fatalf("альбомная страница: получено %v, ожидалось %v", gotLandscape, tc.wantLandscape)
 			}
 
-			// документ обязан заканчиваться портретной страницей
-			wd, ht, _ := r.Pdf.PageSize(r.Pdf.PageCount())
-			if wd > ht {
-				t.Fatalf("последняя страница альбомная: %vx%v", wd, ht)
+			// текст после широкой таблицы дозаполняет её альбомную
+			// страницу, отдельной страницы под него не возникает
+			if got := r.Pdf.PageCount(); got != tc.wantPages {
+				t.Fatalf("страниц: получено %v, ожидалось %v", got, tc.wantPages)
 			}
 		})
 	}
@@ -320,17 +330,33 @@ func TestLandscapeAdjacentTables(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orientations := make([]string, 0, r.Pdf.PageCount())
-	for page := 1; page <= r.Pdf.PageCount(); page++ {
-		wd, ht, _ := r.Pdf.PageSize(page)
-		if wd > ht {
-			orientations = append(orientations, "L")
-			continue
-		}
-		orientations = append(orientations, "P")
-	}
-	if got := strings.Join(orientations, ""); got != "PL" {
+	if got := pageOrientations(r); got != "PL" {
 		t.Fatalf("ориентации страниц: получено %q, ожидалось \"PL\"", got)
+	}
+}
+
+// TestLandscapeTailFlow проверяет дозаполнение альбомной страницы: текст после
+// широкой таблицы продолжается на ней же, а когда место кончается, документ
+// возвращается в портрет — вторая альбомная страница под текст не заводится.
+func TestLandscapeTailFlow(t *testing.T) {
+	para := strings.Repeat("Текст после широкой таблицы, который занимает полосу набора целиком. ", 10) + "\n\n"
+	md := "Текст до таблицы.\n\n" + wideTableMD + "\n" + strings.Repeat(para, 8)
+
+	r := NewPdfRenderer(PdfRendererParams{
+		PdfFile: path.Join("./testdata/", "LandscapeTail.pdf"), Theme: LIGHT,
+	})
+	r.Extensions = parser.Tables
+	r.LandscapeWideTables = true
+	if err := r.Process([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := pageOrientations(r)
+	if !strings.HasPrefix(got, "PLP") {
+		t.Fatalf("ориентации страниц: получено %q, ожидалось начало \"PLP\"", got)
+	}
+	if strings.Count(got, "L") != 1 {
+		t.Fatalf("альбомных страниц: получено %v в %q, ожидалась одна", strings.Count(got, "L"), got)
 	}
 }
 
