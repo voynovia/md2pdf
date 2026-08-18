@@ -131,6 +131,16 @@ type PdfRenderer struct {
 	Extensions                parser.Extensions
 	ColumnWidths              map[ast.Node][]float64
 
+	// LandscapeWideTables разворачивает страницу в альбомную ориентацию под
+	// таблицу, натуральная ширина которой заметно шире портретной полосы.
+	LandscapeWideTables bool
+	// таблицы, отобранные setColumnWidths под альбомную страницу
+	landscapeTables map[ast.Node]bool
+	// признак того, что текущая страница развёрнута под таблицу
+	inLandscape bool
+	// возврат в портрет отложен до следующего узла документа
+	pendingPortrait bool
+
 	tocLinks map[string]*int
 }
 
@@ -338,6 +348,11 @@ func (r *PdfRenderer) SetCustomTheme(themeJSONFile string) {
 	}
 }
 
+// landscapeWidthFactor — во сколько раз натуральная ширина таблицы должна
+// превышать полосу набора, чтобы страница развернулась в альбом. Меньший
+// избыток таблица переживает переносом слов, не теряя читаемости.
+const landscapeWidthFactor = 1.15
+
 // PdfRendererParams struct to hold params passed to NewPdfRenderer
 type PdfRendererParams struct {
 	Orientation, Papersz, PdfFile, TracerFile, FontFile, FontName string
@@ -517,6 +532,7 @@ func (r *PdfRenderer) Run(content []byte) error {
 // Parses all tables and sets the column width to the longest string in that column
 func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 	columnWidths := map[ast.Node][]float64{}
+	landscapeTables := map[ast.Node]bool{}
 	intable := false
 	inheader := true
 	cellnum := 0
@@ -531,12 +547,18 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			} else {
 				intable = false
 				// масштабировать ширины столбцов до ширины страницы
-				pageW, _ := r.Pdf.GetPageSize()
+				pageW, pageH := r.Pdf.GetPageSize()
 				_, _, rightM, _ := r.Pdf.GetMargins()
 				usableW := pageW - r.mleft - rightM
 				totalW := 0.0
 				for _, w := range lengths {
 					totalW += w
+				}
+				// широкая таблица получает альбомную страницу и
+				// масштабируется уже под её полосу
+				if landscapeW := pageH - r.mleft - rightM; r.wantsLandscape(totalW, usableW, landscapeW) {
+					landscapeTables[node] = true
+					usableW = landscapeW
 				}
 				if totalW > usableW {
 					// Минимум каждого столбца = ширина самого длинного слова.
@@ -616,6 +638,52 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 		return ast.GoToNext
 	})
 	r.ColumnWidths = columnWidths
+	r.landscapeTables = landscapeTables
+}
+
+// wantsLandscape сообщает, нужна ли таблице натуральной ширины naturalW
+// альбомная страница: режим включён, документ портретный, альбомная полоса
+// действительно шире, а таблица не помещается в портретную с запасом.
+func (r *PdfRenderer) wantsLandscape(naturalW, portraitW, landscapeW float64) bool {
+	return r.LandscapeWideTables &&
+		strings.HasPrefix(strings.ToLower(r.orientation), "p") &&
+		landscapeW > portraitW &&
+		naturalW > portraitW*landscapeWidthFactor
+}
+
+// addPageOriented начинает новую страницу заданной ориентации ("P" или "L").
+// Размер берётся из формата документа: PageSize(0) отдаёт его в портретных
+// координатах, fpdf сам меняет стороны местами для альбома.
+func (r *PdfRenderer) addPageOriented(orientation string) {
+	wd, ht, _ := r.Pdf.PageSize(0)
+	r.Pdf.AddPageFormat(orientation, fpdf.SizeType{Wd: wd, Ht: ht})
+}
+
+// restorePortrait возвращает документ в портрет перед первым узлом после
+// альбомной таблицы. Возврат отложен намеренно: закончился документ или следом
+// идёт ещё одна альбомная таблица — лишняя пустая портретная страница
+// не появляется.
+func (r *PdfRenderer) restorePortrait(node ast.Node, entering bool) {
+	if !entering || !r.pendingPortrait {
+		return
+	}
+	r.pendingPortrait = false
+	if table, ok := node.(*ast.Table); ok && r.landscapeTables[table] {
+		return
+	}
+	r.inLandscape = false
+	r.addPageOriented("P")
+}
+
+// addPage начинает новую страницу, сохраняя ориентацию текущей: перенос
+// длинной таблицы обязан остаться в альбоме, иначе её столбцы, посчитанные
+// под альбомную полосу, вылезут за портретную страницу.
+func (r *PdfRenderer) addPage() {
+	if r.inLandscape {
+		r.addPageOriented("L")
+		return
+	}
+	r.Pdf.AddPage()
 }
 
 // UpdateParagraphStyler - update with default styler
@@ -674,6 +742,8 @@ func (r *PdfRenderer) writeLink(s Styler, display, url string) {
 // traversal to the next node.
 // (above taken verbatim from the blackfriday v2 package)
 func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
+	r.restorePortrait(node, entering)
+
 	switch node := node.(type) {
 	case *ast.Text:
 		r.processText(node)

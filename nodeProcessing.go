@@ -745,7 +745,7 @@ func (r *PdfRenderer) renderTableRow() {
 		// Первый body row — рендерим отложенный заголовок + body row.
 		hLineH, hRowH := r.rowHeight(headerCells)
 		if r.Pdf.GetY()+hRowH+rowH > pageH-bottomM {
-			r.Pdf.AddPage()
+			r.addPage()
 		}
 		r.renderCells(headerCells, hLineH, hRowH, false)
 		headerRendered = true
@@ -758,7 +758,7 @@ func (r *PdfRenderer) renderTableRow() {
 		}
 		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
 
-		r.Pdf.AddPage()
+		r.addPage()
 		if len(headerCells) > 0 {
 			hLineH, hRowH := r.rowHeight(headerCells)
 			r.renderCells(headerCells, hLineH, hRowH, false)
@@ -776,6 +776,10 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 			textStyle: r.THeader, listkind: notlist,
 			leftMargin: r.cs.peek().leftMargin}
 		r.cr()
+		if r.landscapeTables[node] {
+			r.addPageOriented("L")
+			r.inLandscape = true
+		}
 		r.cs.push(x)
 		fill = false
 		headerCells = nil
@@ -797,6 +801,9 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		r.cs.pop()
 		r.tracer("Table (leaving)", "")
 		r.cr()
+		if r.inLandscape {
+			r.pendingPortrait = true
+		}
 	}
 }
 
