@@ -348,11 +348,6 @@ func (r *PdfRenderer) SetCustomTheme(themeJSONFile string) {
 	}
 }
 
-// landscapeWidthFactor — во сколько раз натуральная ширина таблицы должна
-// превышать полосу набора, чтобы страница развернулась в альбом. Меньший
-// избыток таблица переживает переносом слов, не теряя читаемости.
-const landscapeWidthFactor = 1.15
-
 // PdfRendererParams struct to hold params passed to NewPdfRenderer
 type PdfRendererParams struct {
 	Orientation, Papersz, PdfFile, TracerFile, FontFile, FontName string
@@ -554,19 +549,19 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 				for _, w := range lengths {
 					totalW += w
 				}
+				// Минимум каждого столбца = ширина самого длинного слова.
+				totalMinW := 0.0
+				for _, mw := range minWidths {
+					totalMinW += mw
+				}
 				// широкая таблица получает альбомную страницу и
 				// масштабируется уже под её полосу
-				if landscapeW := pageH - r.mleft - rightM; r.wantsLandscape(totalW, usableW, landscapeW) {
+				if landscapeW := pageH - r.mleft - rightM; r.wantsLandscape(totalW, totalMinW, usableW, landscapeW) {
 					landscapeTables[node] = true
 					usableW = landscapeW
 				}
 				if totalW > usableW {
-					// Минимум каждого столбца = ширина самого длинного слова.
 					// Оставшееся пространство распределяется пропорционально.
-					totalMinW := 0.0
-					for _, mw := range minWidths {
-						totalMinW += mw
-					}
 					if totalMinW >= usableW {
 						// Даже минимумы не помещаются — равное распределение
 						equalW := usableW / float64(len(lengths))
@@ -641,14 +636,20 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 	r.landscapeTables = landscapeTables
 }
 
-// wantsLandscape сообщает, нужна ли таблице натуральной ширины naturalW
-// альбомная страница: режим включён, документ портретный, альбомная полоса
-// действительно шире, а таблица не помещается в портретную с запасом.
-func (r *PdfRenderer) wantsLandscape(naturalW, portraitW, landscapeW float64) bool {
+// wantsLandscape сообщает, нужна ли таблице альбомная страница. Разворот
+// стоит документу разрыва страницы и пустого места до и после таблицы,
+// поэтому его заслуживает лишь та таблица, которой портретная полоса
+// безнадёжна: натуральная ширина naturalW превышает даже альбомную полосу
+// (перенос слов неизбежен в любой ориентации, и альбом честно забирает всю
+// добавочную ширину) либо портретная полоса уже́ суммы самых длинных слов
+// minW, то есть столбцы пришлось бы рвать по буквам. Умеренный избыток между
+// портретной и альбомной полосой таблица переживает переносом слов на месте —
+// это дешевле пустых страниц.
+func (r *PdfRenderer) wantsLandscape(naturalW, minW, portraitW, landscapeW float64) bool {
 	return r.LandscapeWideTables &&
 		strings.HasPrefix(strings.ToLower(r.orientation), "p") &&
 		landscapeW > portraitW &&
-		naturalW > portraitW*landscapeWidthFactor
+		(naturalW > landscapeW || minW > portraitW)
 }
 
 // addPageOriented начинает новую страницу заданной ориентации ("P" или "L").

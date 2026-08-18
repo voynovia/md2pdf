@@ -238,8 +238,10 @@ func TestTableEmptyHeaderBR(t *testing.T) {
 }
 
 // TestLandscapeWideTable проверяет разворот страницы под широкую таблицу:
-// таблица шире полосы набора уезжает на альбомную страницу, документ после
-// неё возвращается в портрет, а узкая таблица ориентацию не меняет.
+// таблица, которой мало даже альбомной полосы, уезжает на альбомную страницу,
+// документ после неё возвращается в портрет, а узкая и умеренно широкая
+// таблицы ориентацию не меняют — вторая переносит слова на месте, что дешевле
+// пустого места до и после разворота.
 func TestLandscapeWideTable(t *testing.T) {
 	wide := "Текст до таблицы.\n\n" +
 		"| Название станции | Позывной | Частота | Период передачи | Часы работы | Аэродромы | Содержание сводок |\n" +
@@ -250,6 +252,15 @@ func TestLandscapeWideTable(t *testing.T) {
 
 	narrow := "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
 
+	// умеренно широкая: натуральная ширина больше портретной полосы, но
+	// меньше альбомной — переносится словами на портретной странице
+	moderate := "Текст до таблицы.\n\n" +
+		"| Route designator | Compulsory reporting points | GEO coordinates | ACC |\n" +
+		"| --- | --- | --- | --- |\n" +
+		"| A 810 | RINOP | 521002N 1094701E | Irkutsk ACC |\n" +
+		"| L 870 | PITIN | 613802N 0582800E | Yekaterinburg ACC / Sankt-Peterbrug ACC |\n\n" +
+		"Текст после таблицы.\n"
+
 	tests := []struct {
 		name          string
 		md            string
@@ -257,6 +268,7 @@ func TestLandscapeWideTable(t *testing.T) {
 	}{
 		{"wide", wide, true},
 		{"narrow", narrow, false},
+		{"moderate", moderate, false},
 	}
 
 	for _, tc := range tests {
@@ -290,8 +302,9 @@ func TestLandscapeWideTable(t *testing.T) {
 	}
 }
 
-// TestLandscapeAdjacentTables проверяет, что между двумя широкими таблицами
-// подряд не появляется пустая портретная страница.
+// TestLandscapeAdjacentTables проверяет, что две широкие таблицы подряд
+// занимают одну альбомную страницу: ни пустой портретной между ними, ни
+// отдельной альбомной страницы на каждую.
 func TestLandscapeAdjacentTables(t *testing.T) {
 	row := "| Название станции | Позывной радиостанции | Частота передачи | Период радиовещания | Часы работы органа | Аэродромы и районы | Содержание сводок |\n"
 	md := "Текст до таблиц.\n\n" +
@@ -316,8 +329,8 @@ func TestLandscapeAdjacentTables(t *testing.T) {
 		}
 		orientations = append(orientations, "P")
 	}
-	if got := strings.Join(orientations, ""); got != "PLL" {
-		t.Fatalf("ориентации страниц: получено %q, ожидалось \"PLL\"", got)
+	if got := strings.Join(orientations, ""); got != "PL" {
+		t.Fatalf("ориентации страниц: получено %q, ожидалось \"PL\"", got)
 	}
 }
 

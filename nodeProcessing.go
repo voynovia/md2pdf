@@ -776,7 +776,10 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 			textStyle: r.THeader, listkind: notlist,
 			leftMargin: r.cs.peek().leftMargin}
 		r.cr()
-		if r.landscapeTables[node] {
+		// Альбомная страница нужна только первой таблице группы: соседняя
+		// широкая таблица продолжается на той же странице, а её перенос
+		// оставит r.addPage в альбоме.
+		if r.landscapeTables[node] && !r.inLandscape {
 			r.addPageOriented("L")
 			r.inLandscape = true
 		}
