@@ -282,7 +282,7 @@ func TestLandscapeWideTable(t *testing.T) {
 		wantLandscape bool
 		wantPages     int
 	}{
-		{"wide", wide, true, 2},
+		{"wide", wide, true, 1},
 		{"narrow", narrow, false, 1},
 		{"moderate", moderate, false, 1},
 	}
@@ -303,8 +303,8 @@ func TestLandscapeWideTable(t *testing.T) {
 				t.Fatalf("альбомная страница: получено %v, ожидалось %v", gotLandscape, tc.wantLandscape)
 			}
 
-			// текст после широкой таблицы дозаполняет её альбомную
-			// страницу, отдельной страницы под него не возникает
+			// текст до таблицы открывает её альбомную страницу, текст после
+			// дозаполняет ту же — отдельных страниц под них не возникает
 			if got := r.Pdf.PageCount(); got != tc.wantPages {
 				t.Fatalf("страниц: получено %v, ожидалось %v", got, tc.wantPages)
 			}
@@ -312,9 +312,9 @@ func TestLandscapeWideTable(t *testing.T) {
 	}
 }
 
-// TestLandscapeAdjacentTables проверяет, что две широкие таблицы подряд
-// занимают одну альбомную страницу: ни пустой портретной между ними, ни
-// отдельной альбомной страницы на каждую.
+// TestLandscapeAdjacentTables проверяет, что две широкие таблицы подряд и
+// текст перед ними занимают одну альбомную страницу: ни портретной страницы
+// под текст, ни отдельной альбомной на каждую таблицу.
 func TestLandscapeAdjacentTables(t *testing.T) {
 	row := "| Название станции | Позывной радиостанции | Частота передачи | Период радиовещания | Часы работы органа | Аэродромы и районы | Содержание сводок |\n"
 	md := "Текст до таблиц.\n\n" +
@@ -330,8 +330,8 @@ func TestLandscapeAdjacentTables(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := pageOrientations(r); got != "PL" {
-		t.Fatalf("ориентации страниц: получено %q, ожидалось \"PL\"", got)
+	if got := pageOrientations(r); got != "L" {
+		t.Fatalf("ориентации страниц: получено %q, ожидалось \"L\"", got)
 	}
 }
 
@@ -372,9 +372,10 @@ func TestColumnMinWidthFitsWord(t *testing.T) {
 	}
 }
 
-// TestLandscapeTailFlow проверяет дозаполнение альбомной страницы: текст после
-// широкой таблицы продолжается на ней же, а когда место кончается, документ
-// возвращается в портрет — вторая альбомная страница под текст не заводится.
+// TestLandscapeTailFlow проверяет дозаполнение альбомной страницы: текст до
+// таблицы открывает её альбомную страницу, текст после продолжается на ней же,
+// а когда место кончается, документ возвращается в портрет — вторая альбомная
+// страница под текст не заводится.
 func TestLandscapeTailFlow(t *testing.T) {
 	para := strings.Repeat("Текст после широкой таблицы, который занимает полосу набора целиком. ", 10) + "\n\n"
 	md := "Текст до таблицы.\n\n" + wideTableMD + "\n" + strings.Repeat(para, 8)
@@ -389,8 +390,8 @@ func TestLandscapeTailFlow(t *testing.T) {
 	}
 
 	got := pageOrientations(r)
-	if !strings.HasPrefix(got, "PLP") {
-		t.Fatalf("ориентации страниц: получено %q, ожидалось начало \"PLP\"", got)
+	if !strings.HasPrefix(got, "LP") {
+		t.Fatalf("ориентации страниц: получено %q, ожидалось начало \"LP\"", got)
 	}
 	if strings.Count(got, "L") != 1 {
 		t.Fatalf("альбомных страниц: получено %v в %q, ожидалась одна", strings.Count(got, "L"), got)

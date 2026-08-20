@@ -149,6 +149,8 @@ type PdfRenderer struct {
 	suppressBreak bool
 	// отступ, ставящий узкую таблицу по центру полосы набора
 	tableIndent float64
+	// следующий блок обязан начать свою страницу (ориентацию выберет он сам)
+	pendingPage bool
 
 	tocLinks map[string]*int
 }
@@ -407,7 +409,9 @@ func NewPdfRenderer(params PdfRendererParams) *PdfRenderer {
 			r.SetCustomTheme(params.CustomThemeFile)
 		}
 	}
-	r.Pdf.AddPage()
+	// Первая страница создаётся лениво, в RenderNode: её ориентация зависит от
+	// первого же блока документа, а он известен только после разбора markdown.
+	r.pendingPage = true
 	// set default font
 	r.setStyler(r.Normal)
 	r.mleft, r.mtop, r.mright, r.mbottom = r.Pdf.GetMargins()
@@ -534,6 +538,10 @@ func (r *PdfRenderer) Run(content []byte) error {
 	setColumnWidths(doc, r)
 	markLandscapePreludes(doc, r)
 	_ = markdown.Render(doc, r)
+	if r.Pdf.PageNo() == 0 {
+		r.Pdf.AddPage() // пустой документ: PDF без страниц не собирается
+	}
+	r.pendingPage = false
 	// футер последней страницы рисуется при закрытии документа — поле полосы
 	// набора к этому моменту обязано быть обычным
 	r.Pdf.SetRightMargin(r.mright)
@@ -792,43 +800,69 @@ func (r *PdfRenderer) leaveLandscape() {
 //	flowchart TD
 //	    A[fpdf: место кончилось] --> B{линия/перевод после таблицы?}
 //	    B -- да --> C[разрыв отклонить, страницу не заводить]
-//	    B -- нет --> D{дозаполняем альбом?}
+//	    B -- нет --> D{преддверие таблицы или хвост альбома?}
 //	    D -- нет --> E[вернуть режим авто-разрыва fpdf]
-//	    D -- да --> F[вернуть поля, начать портретную]
+//	    D -- да --> F[завести страницу нужной ориентации самим]
 //	    F --> G[разрыв отклонить: пишем на новой странице]
 //	```
 func (r *PdfRenderer) acceptPageBreak() bool {
 	if r.suppressBreak {
 		return false
 	}
-	if !r.landscapeTail {
-		if r.inPrelude && !r.inLandscape {
-			// страница, на которой окажется только текст перед широкой
-			// таблицей, сразу открывается альбомной — таблица продолжит её
-			r.addPage()
-			return false
-		}
+	if !r.inPrelude && !r.landscapeTail {
 		auto, _ := r.Pdf.GetAutoPageBreak()
 		return auto
 	}
-	// Родной путь разрыва (fpdf.go, CellFormat) сохраняет позицию строки и
-	// гасит межсловный интервал перед новой страницей: оператор Tw живёт в
-	// потоке страницы, поэтому на уходящей странице он обязан закрыться, иначе
-	// растянутые пробелы достанутся её футеру. Перехват обязан повторить это
-	// сам — иначе fpdf сделал бы всю уборку, но развернул бы ещё одну
-	// альбомную страницу.
+	// Дальше страницу заводит рендерер: fpdf развернул бы её по текущей
+	// ориентации, а нужна другая. Родной путь разрыва (fpdf.go, CellFormat)
+	// сохраняет позицию строки и гасит межсловный интервал перед новой
+	// страницей: оператор Tw живёт в потоке страницы, поэтому на уходящей
+	// странице он обязан закрыться, иначе растянутые пробелы достанутся её
+	// футеру. Перехват обязан повторить это сам.
 	x := r.Pdf.GetX()
 	ws := r.Pdf.GetWordSpacing()
 	if ws != 0 {
 		r.Pdf.SetWordSpacing(0)
 	}
-	r.leaveLandscape()
-	r.addPageOriented("P")
+	r.addPage()
 	r.Pdf.SetX(x)
 	if ws != 0 {
 		r.Pdf.SetWordSpacing(ws)
 	}
 	return false
+}
+
+// ensureFirstPage создаёт первую страницу под ориентацию первого же блока
+// документа. Страница, созданная заранее, была бы портретной, и документ,
+// который начинается широкой таблицей (или парой строк текста перед ней),
+// открывался бы почти пустым листом: развернуть уже открытую страницу fpdf
+// не позволяет.
+func (r *PdfRenderer) ensureFirstPage(node ast.Node, entering bool) {
+	if !entering || !r.pendingPage {
+		return
+	}
+	if _, isDoc := node.(*ast.Document); isDoc {
+		return // сам документ ничего не рисует
+	}
+	r.pendingPage = false
+	if table, ok := node.(*ast.Table); (ok && r.landscapeTables[table]) || r.inPrelude {
+		r.addPageOriented("L")
+		r.inLandscape = true
+		if !ok {
+			r.beginLandscapeTail() // текст до таблицы идёт колонкой обычной ширины
+		}
+		return
+	}
+	r.Pdf.AddPage()
+}
+
+// RequestNewPage откладывает следующую страницу до первого же блока документа,
+// чтобы её ориентацию выбрал он сам. Нужна тому, кто пишет что-то своё перед
+// содержимым — например страницу оглавления: обычный AddPage создал бы
+// портретную страницу, и широкая таблица за парой строк текста опять открыла
+// бы альбомную, бросив портретную полупустой.
+func (r *PdfRenderer) RequestNewPage() {
+	r.pendingPage = true
 }
 
 // addPage начинает новую страницу под продолжение таблицы. Перенос широкой
@@ -838,7 +872,9 @@ func (r *PdfRenderer) acceptPageBreak() bool {
 // её продолжение уходит в портрет.
 func (r *PdfRenderer) addPage() {
 	switch {
-	case r.inPrelude && !r.inLandscape:
+	case r.inPrelude:
+		// следом широкая таблица: страница открывается альбомной, даже если
+		// текущая уже альбомная — тогда таблица получит её целиком
 		r.addPageOriented("L")
 		r.inLandscape = true
 		r.beginLandscapeTail()
@@ -911,6 +947,7 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 	if entering && r.landscapePrelude[node] {
 		r.inPrelude = true
 	}
+	r.ensureFirstPage(node, entering)
 
 	switch node := node.(type) {
 	case *ast.Text:
@@ -1005,6 +1042,9 @@ func dorect(doc *fpdf.Fpdf, x, y, w, h float64, color Color) {
 
 // SetPageBackground - sets background colour of page. String IDs ("blue", "grey", etc) and `Color` structs are both supported
 func (r *PdfRenderer) SetPageBackground(colorStr string, color Color) {
+	if r.Pdf.PageNo() == 0 {
+		return // страницы ещё нет; каждую следующую красит header-функция
+	}
 	w, h := r.Pdf.GetPageSize()
 	if colorStr != "" {
 		color = Colorlookup(colorStr)
