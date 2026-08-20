@@ -147,10 +147,10 @@ type PdfRenderer struct {
 	inPrelude bool
 	// разрыв страницы запрещён: идёт замыкающая линия таблицы нулевой высоты
 	suppressBreak bool
-	// отступ, ставящий узкую таблицу по центру полосы набора
-	tableIndent float64
 	// следующий блок обязан начать свою страницу (ориентацию выберет он сам)
 	pendingPage bool
+	// номер альбомной страницы, на которой текст после таблицы идёт во всю полосу
+	tailWidePage int
 
 	tocLinks map[string]*int
 }
@@ -765,6 +765,19 @@ func (r *PdfRenderer) enterLandscape() bool {
 	return true
 }
 
+// widenToLandscape возвращает полосе набора всю альбомную ширину. Текст перед
+// широкой таблицей пишется во всю страницу: узкая колонка на альбомном листе
+// оставляет справа пустое поле и читается как чужая. Тексту ПОСЛЕ таблицы так
+// нельзя — он может перетечь на портретную страницу, где ширина уже другая, а
+// fpdf запоминает её в начале абзаца.
+func (r *PdfRenderer) widenToLandscape() {
+	if !r.inLandscape || !r.landscapeTail {
+		return
+	}
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+}
+
 // beginLandscapeTail пускает поток дальше по альбомной странице, вместо того
 // чтобы бросать её низ пустым. Колонка текста сужается до портретной ширины:
 // строки читаются как на остальных страницах, а перенос абзаца через границу
@@ -776,8 +789,70 @@ func (r *PdfRenderer) enterLandscape() bool {
 // пока обе полосы совпадают. Любая иная ширина хвоста молча испортит перенос.
 func (r *PdfRenderer) beginLandscapeTail() {
 	r.landscapeTail = true
+	r.tailWidePage = r.Pdf.PageNo()
 	pageW, pageH := r.Pdf.GetPageSize()
 	r.Pdf.SetRightMargin(pageW - pageH + r.mright)
+}
+
+// tailBlockHeight — оценка высоты блока при ширине полосы colW. Оценка
+// намеренно завышена: недооценка порвала бы абзац на границе ориентаций, где
+// ширина полосы меняется, и остаток абзаца вылез бы за поле.
+func (r *PdfRenderer) tailBlockHeight(node ast.Node, colW float64) float64 {
+	style := r.Normal
+	if head, ok := node.(*ast.Heading); ok {
+		style = r.headingStyle(head.Level)
+	}
+	r.setStyler(style)
+
+	lines, blocks := 0, 1
+	ast.WalkFunc(node, func(nd ast.Node, entering bool) ast.WalkStatus {
+		if !entering {
+			return ast.GoToNext
+		}
+		switch inner := nd.(type) {
+		case *ast.Text:
+			n := len(r.Pdf.SplitLines(inner.Literal, colW))
+			if n == 0 {
+				n = 1
+			}
+			lines += n
+		case *ast.ListItem, *ast.Paragraph, *ast.CodeBlock:
+			blocks++
+		}
+		return ast.GoToNext
+	})
+	if lines == 0 {
+		lines = 1
+	}
+	return float64(lines+blocks) * (style.Size + style.Spacing) * 1.2
+}
+
+// fitTailBlock решает судьбу блока, попавшего на альбомную страницу следом за
+// таблицей. Блок, помещающийся целиком, пишется во всю альбомную полосу: узкая
+// колонка на альбомном листе оставляет справа пустое поле. Блок, который не
+// помещается, уводит документ в портрет заранее — иначе абзац разорвался бы на
+// границе, где ширина полосы меняется. На следующих альбомных страницах полоса
+// снова портретной ширины: там абзац переносится на портретную страницу и обе
+// ширины обязаны совпадать.
+func (r *PdfRenderer) fitTailBlock(node ast.Node) {
+	if !r.landscapeTail || r.inPrelude || r.Pdf.PageNo() != r.tailWidePage {
+		return
+	}
+	if _, top := node.GetParent().(*ast.Document); !top {
+		return // не блок верхнего уровня — решение уже принято за него
+	}
+	if _, isTable := node.(*ast.Table); isTable {
+		return // таблица считает ширины сама
+	}
+
+	lm, _, _, bm := r.Pdf.GetMargins()
+	pageW, pageH := r.Pdf.GetPageSize()
+	if r.Pdf.GetY()+r.tailBlockHeight(node, pageW-lm-r.mright) <= pageH-bm {
+		r.Pdf.SetRightMargin(r.mright)
+		return
+	}
+	r.leaveLandscape()
+	r.addPageOriented("P")
 }
 
 // leaveLandscape возвращает документ в портрет. Правое поле восстанавливается
@@ -851,10 +926,7 @@ func (r *PdfRenderer) ensureFirstPage(node ast.Node, entering bool) {
 	if table, ok := node.(*ast.Table); (ok && r.landscapeTables[table]) || r.inPrelude {
 		r.addPageOriented("L")
 		r.inLandscape = true
-		if !ok {
-			r.beginLandscapeTail() // текст до таблицы идёт колонкой обычной ширины
-		}
-		return
+		return // и таблица, и её преддверие пишутся во всю альбомную полосу
 	}
 	r.Pdf.AddPage()
 }
@@ -880,7 +952,8 @@ func (r *PdfRenderer) addPage() {
 		// текущая уже альбомная — тогда таблица получит её целиком
 		r.addPageOriented("L")
 		r.inLandscape = true
-		r.beginLandscapeTail()
+		r.landscapeTail = false
+		r.Pdf.SetRightMargin(r.mright)
 	case r.landscapeTail:
 		r.leaveLandscape()
 		r.addPageOriented("P")
@@ -949,6 +1022,10 @@ func (r *PdfRenderer) writeLink(s Styler, display, url string) {
 func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
 	if entering && r.landscapePrelude[node] {
 		r.inPrelude = true
+		r.widenToLandscape()
+	}
+	if entering {
+		r.fitTailBlock(node)
 	}
 	r.ensureFirstPage(node, entering)
 

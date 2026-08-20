@@ -806,7 +806,9 @@ func (r *PdfRenderer) rowHeight(cells []cellContent) (lineH, rowH float64) {
 
 // renderCells рендерит набор ячеек как строку таблицы.
 func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFill bool) {
-	startX := r.cs.peek().leftMargin + r.tableIndent
+	// Отступ считается на каждую строку: таблица может начаться на альбомной
+	// странице и продолжиться на портретной, где полоса набора другая.
+	startX := r.cs.peek().leftMargin + r.centeringIndent(cellwidths)
 	startY := r.Pdf.GetY()
 	x := startX
 
@@ -915,7 +917,6 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		headerCells = nil
 		headerRendered = false
 		cellwidths = r.ColumnWidths[node]
-		r.tableIndent = r.centeringIndent(cellwidths)
 	} else {
 		if !headerRendered && len(headerCells) > 0 {
 			hLineH, hRowH := r.rowHeight(headerCells)
