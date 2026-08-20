@@ -560,9 +560,117 @@ func (r *PdfRenderer) processBlockQuote(node ast.Node, entering bool) {
 	}
 }
 
-func (r *PdfRenderer) processHeading(node ast.Heading, entering bool) {
+// tableStartLines — во сколько строк текста оценивается начало таблицы под
+// заголовком: шапка и первая строка данных вместе с полями ячеек.
+const tableStartLines = 4
+
+// headingHeight — высота заголовка вместе с отбивкой под ним.
+func (r *PdfRenderer) headingHeight(level int, text string, colW float64) float64 {
+	style := r.headingStyle(level)
+	r.setStyler(style)
+	lines := len(r.Pdf.SplitLines([]byte(text), colW))
+	if lines == 0 {
+		lines = 1
+	}
+	return float64(lines+1) * (style.Size + style.Spacing)
+}
+
+// headingStyle отдаёт стиль заголовка по его уровню.
+func (r *PdfRenderer) headingStyle(level int) Styler {
+	switch level {
+	case 1:
+		return r.H1
+	case 2:
+		return r.H2
+	case 3:
+		return r.H3
+	case 4:
+		return r.H4
+	case 5:
+		return r.H5
+	default:
+		return r.H6
+	}
+}
+
+// nextSibling отдаёт следующий блок того же родителя.
+func nextSibling(node ast.Node) ast.Node {
+	parent := node.GetParent()
+	if parent == nil {
+		return nil
+	}
+	children := parent.GetChildren()
+	for i, child := range children {
+		if child == ast.Node(node) && i+1 < len(children) {
+			return children[i+1]
+		}
+	}
+	return nil
+}
+
+// keepHeadingWithText переносит заголовок на следующую страницу, если под ним
+// не осталось места хотя бы на одну строку текста. Одинокий заголовок внизу
+// листа оторван от своего раздела: читатель видит название, а содержание
+// начинается только после переворота страницы.
+//
+// Flow:
+//
+//	```mermaid
+//	flowchart TD
+//	    A[заголовок] --> B{за ним есть блок?}
+//	    B -- нет --> Z[оставить на месте]
+//	    B -- да --> C{страница только началась?}
+//	    C -- да --> Z
+//	    C -- нет --> D{заголовок + строка текста влезают?}
+//	    D -- да --> Z
+//	    D -- нет --> E[перенести на следующую страницу]
+//	```
+func (r *PdfRenderer) keepHeadingWithText(node *ast.Heading) {
+	follow := nextSibling(node)
+	if follow == nil {
+		return // заголовок замыкает раздел — отрывать его не от чего
+	}
+	lm, topM, rm, bottomM := r.Pdf.GetMargins()
+	y := r.Pdf.GetY()
+	if y <= topM+1 {
+		return // страница только началась: перенос дал бы пустой лист
+	}
+
+	pageW, pageH := r.Pdf.GetPageSize()
+	colW := pageW - lm - rm
+
+	// сам заголовок и отбивка после него; подзаголовок сразу за заголовком
+	// висел бы точно так же, поэтому цепочка считается до первого настоящего
+	// блока раздела
+	need := r.headingHeight(node.Level, ast.ToString(node.AsContainer()), colW)
+	for {
+		head, isHeading := follow.(*ast.Heading)
+		if !isHeading {
+			break
+		}
+		need += r.headingHeight(head.Level, ast.ToString(head.AsContainer()), colW)
+		follow = nextSibling(follow)
+		if follow == nil {
+			return // дальше только заголовки до конца документа
+		}
+	}
+
+	// начало раздела: строка текста, а для таблицы — шапка с первой строкой
+	// данных, которые тоньше не разрываются и утащили бы заголовок за собой
+	startLines := 1.0
+	if _, isTable := follow.(*ast.Table); isTable {
+		startLines = tableStartLines
+	}
+	need += startLines * (r.Normal.Size + r.Normal.Spacing)
+	if y+need > pageH-bottomM {
+		r.addPage()
+	}
+}
+
+func (r *PdfRenderer) processHeading(node *ast.Heading, entering bool) {
 	if entering {
 		r.cr()
+		r.keepHeadingWithText(node)
 		switch node.Level {
 		case 1:
 			r.tracer("Heading (1, entering)", fmt.Sprintf("%v", ast.ToString(node.AsContainer())))

@@ -803,9 +803,7 @@ func (r *PdfRenderer) acceptPageBreak() bool {
 		if r.inPrelude && !r.inLandscape {
 			// страница, на которой окажется только текст перед широкой
 			// таблицей, сразу открывается альбомной — таблица продолжит её
-			r.addPageOriented("L")
-			r.inLandscape = true
-			r.beginLandscapeTail()
+			r.addPage()
 			return false
 		}
 		auto, _ := r.Pdf.GetAutoPageBreak()
@@ -838,6 +836,10 @@ func (r *PdfRenderer) acceptPageBreak() bool {
 // её продолжение уходит в портрет.
 func (r *PdfRenderer) addPage() {
 	switch {
+	case r.inPrelude && !r.inLandscape:
+		r.addPageOriented("L")
+		r.inLandscape = true
+		r.beginLandscapeTail()
 	case r.landscapeTail:
 		r.leaveLandscape()
 		r.addPageOriented("P")
@@ -944,7 +946,7 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 	case *ast.HTMLBlock:
 		r.processHTMLBlock(node)
 	case *ast.Heading:
-		r.processHeading(*node, entering)
+		r.processHeading(node, entering)
 	case *ast.HorizontalRule:
 		r.processHorizontalRule(node)
 	case *ast.List:
