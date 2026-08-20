@@ -680,8 +680,10 @@ const landscapePreludeBudget = 1500
 // таблица портретную страницу дописать уже не может.
 //
 // Назад от таблицы отбираются подряд идущие блоки, пока их суммарный объём
-// держится в бюджете; таблица, горизонтальная линия или превышение бюджета
-// прекращают отбор.
+// держится в бюджете. Отбор прекращают другая АЛЬБОМНАЯ таблица (у неё своя
+// страница и своё преддверие), горизонтальная линия и превышение бюджета.
+// Обычная таблица преддверию не помеха: её столбцы посчитаны под портретную
+// полосу, и на альбомной странице она встанет так же, как текст.
 func markLandscapePreludes(doc ast.Node, r *PdfRenderer) {
 	prelude := map[ast.Node]bool{}
 	children := doc.GetChildren()
@@ -692,10 +694,11 @@ func markLandscapePreludes(doc ast.Node, r *PdfRenderer) {
 		}
 		budget := landscapePreludeBudget
 		for j := i - 1; j >= 0; j-- {
-			switch children[j].(type) {
-			case *ast.Table, *ast.HorizontalRule:
-				j = -1
-				continue
+			if prev, isTable := children[j].(*ast.Table); isTable && r.landscapeTables[prev] {
+				break // у той таблицы своя альбомная страница и своё преддверие
+			}
+			if _, isRule := children[j].(*ast.HorizontalRule); isRule {
+				break // черта отделяет разделы, за неё не заходим
 			}
 			size := blockTextLen(children[j])
 			if size > budget {
