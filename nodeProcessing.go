@@ -564,6 +564,24 @@ func (r *PdfRenderer) processBlockQuote(node ast.Node, entering bool) {
 // заголовком: шапка и первая строка данных вместе с полями ячеек.
 const tableStartLines = 4
 
+// centeringIndent — отступ, ставящий таблицу по центру полосы набора. Таблица
+// уже полосы прижималась к левому полю, и рядом с ней оставалась широкая
+// пустая колонка; по центру она читается как самостоятельный блок. Таблица во
+// всю полосу отступа не получает.
+func (r *PdfRenderer) centeringIndent(widths []float64) float64 {
+	total := 0.0
+	for _, w := range widths {
+		total += w
+	}
+	pageW, _ := r.Pdf.GetPageSize()
+	_, _, rm, _ := r.Pdf.GetMargins()
+	usable := pageW - r.cs.peek().leftMargin - rm
+	if total >= usable {
+		return 0
+	}
+	return (usable - total) / 2
+}
+
 // headingHeight — высота заголовка вместе с отбивкой под ним.
 func (r *PdfRenderer) headingHeight(level int, text string, colW float64) float64 {
 	style := r.headingStyle(level)
@@ -788,7 +806,7 @@ func (r *PdfRenderer) rowHeight(cells []cellContent) (lineH, rowH float64) {
 
 // renderCells рендерит набор ячеек как строку таблицы.
 func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFill bool) {
-	startX := r.cs.peek().leftMargin
+	startX := r.cs.peek().leftMargin + r.tableIndent
 	startY := r.Pdf.GetY()
 	x := startX
 
@@ -897,6 +915,7 @@ func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
 		headerCells = nil
 		headerRendered = false
 		cellwidths = r.ColumnWidths[node]
+		r.tableIndent = r.centeringIndent(cellwidths)
 	} else {
 		if !headerRendered && len(headerCells) > 0 {
 			hLineH, hRowH := r.rowHeight(headerCells)

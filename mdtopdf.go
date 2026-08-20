@@ -147,6 +147,8 @@ type PdfRenderer struct {
 	inPrelude bool
 	// разрыв страницы запрещён: идёт замыкающая линия таблицы нулевой высоты
 	suppressBreak bool
+	// отступ, ставящий узкую таблицу по центру полосы набора
+	tableIndent float64
 
 	tocLinks map[string]*int
 }
