@@ -16,9 +16,9 @@
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7
 [cr()] LH=14
 [Text] Fix for backticks within HTML tag: 
-[HTMLSpan] Not handled
+[HTMLSpan] <span attr='`ticks`'>
 [Text] like this
-[HTMLSpan] Not handled
+[HTMLSpan] </span>
 [Paragraph (leaving)] 
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7
 [cr()] LH=14

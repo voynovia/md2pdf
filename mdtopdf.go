@@ -22,11 +22,13 @@ package mdtopdf
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"unicode/utf8"
 
 	"strings"
 
@@ -130,6 +132,26 @@ type PdfRenderer struct {
 	Extensions                parser.Extensions
 	ColumnWidths              map[ast.Node][]float64
 
+	// LandscapeWideTables разворачивает страницу в альбомную ориентацию под
+	// таблицу, натуральная ширина которой заметно шире портретной полосы.
+	LandscapeWideTables bool
+	// таблицы, отобранные setColumnWidths под альбомную страницу
+	landscapeTables map[ast.Node]bool
+	// признак того, что текущая страница развёрнута под таблицу
+	inLandscape bool
+	// альбомная страница дозаполняется обычным потоком после таблицы
+	landscapeTail bool
+	// блоки, которые стоит забрать на альбомную страницу перед таблицей
+	landscapePrelude map[ast.Node]bool
+	// рендерится блок из такого преддверия
+	inPrelude bool
+	// разрыв страницы запрещён: идёт замыкающая линия таблицы нулевой высоты
+	suppressBreak bool
+	// следующий блок обязан начать свою страницу (ориентацию выберет он сам)
+	pendingPage bool
+	// номер альбомной страницы, на которой текст после таблицы идёт во всю полосу
+	tailWidePage int
+
 	tocLinks map[string]*int
 }
 
@@ -192,7 +214,7 @@ func ExtractTextFromNode(node ast.Node) string {
 		return ast.GoToNext
 	})
 
-	return text.String()
+	return strings.ReplaceAll(text.String(), "\t", "    ")
 }
 
 // GetTOCEntries returns TOC entries
@@ -387,10 +409,16 @@ func NewPdfRenderer(params PdfRendererParams) *PdfRenderer {
 			r.SetCustomTheme(params.CustomThemeFile)
 		}
 	}
-	r.Pdf.AddPage()
+	// Первая страница создаётся лениво, в RenderNode: её ориентация зависит от
+	// первого же блока документа, а он известен только после разбора markdown.
+	r.pendingPage = true
 	// set default font
 	r.setStyler(r.Normal)
 	r.mleft, r.mtop, r.mright, r.mbottom = r.Pdf.GetMargins()
+	// Перехватчик разрывов нужен любому документу: он гасит разрыв под
+	// замыкающую линию таблицы, а не только возвращает в портрет после
+	// альбомной. Вне своих случаев отдаёт ровно то, что вернул бы fpdf.
+	r.Pdf.SetAcceptPageBreakFunc(r.acceptPageBreak)
 	r.em = r.Pdf.GetStringWidth("m")
 	r.IndentValue = 3 * r.em
 
@@ -403,6 +431,12 @@ func NewPdfRenderer(params PdfRendererParams) *PdfRenderer {
 	for _, o := range params.Opts {
 		o(r)
 	}
+
+	// Синхронизация начального контейнера с финальным r.Normal.
+	// Opts callbacks могут изменить r.Normal (через json.Unmarshal),
+	// начальный textStyle должен отражать финальное значение,
+	// иначе standalone-параграфы используют устаревший стиль.
+	r.cs.stack[0].textStyle = r.Normal
 
 	return r
 }
@@ -454,6 +488,36 @@ func (r *PdfRenderer) Process(content []byte) error {
 	return nil
 }
 
+// preprocessTables убирает ведущий whitespace у строк, являющихся частью
+// таблицы (начинаются с '|' после trim). Это позволяет парсеру распознавать
+// таблицы с отступом внутри list items, где gomarkdown их иначе игнорирует.
+// Строки внутри fenced code blocks не затрагиваются.
+func preprocessTables(content []byte) []byte {
+	lines := bytes.Split(content, []byte("\n"))
+	inFence := false
+	changed := false
+	for i, line := range lines {
+		trimmed := bytes.TrimLeft(line, " \t")
+		if bytes.HasPrefix(trimmed, []byte("```")) {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		// Строка с indent + pipe — потенциальная строка таблицы.
+		// Не трогаем строки без отступа (уже корректны для парсера).
+		if len(trimmed) < len(line) && len(trimmed) > 0 && trimmed[0] == '|' {
+			lines[i] = trimmed
+			changed = true
+		}
+	}
+	if !changed {
+		return content
+	}
+	return bytes.Join(lines, []byte("\n"))
+}
+
 // Run takes the markdown content, parses it but don't generate the PDF. you can access the PDF with youRenderer.Pdf
 func (r *PdfRenderer) Run(content []byte) error {
 	// Preprocess content by changing all CRLF to LF
@@ -464,11 +528,23 @@ func (r *PdfRenderer) Run(content []byte) error {
 		s = []byte(r.unicodeTranslator(string(s)))
 	}
 
+	// Убрать отступы у строк таблиц внутри list items,
+	// чтобы парсер мог распознать их как *ast.Table.
+	s = preprocessTables(s)
+
 	p := parser.NewWithExtensions(r.Extensions)
 	doc := markdown.Parse(s, p)
 
 	setColumnWidths(doc, r)
+	markLandscapePreludes(doc, r)
 	_ = markdown.Render(doc, r)
+	if r.Pdf.PageNo() == 0 {
+		r.Pdf.AddPage() // пустой документ: PDF без страниц не собирается
+	}
+	r.pendingPage = false
+	// футер последней страницы рисуется при закрытии документа — поле полосы
+	// набора к этому моменту обязано быть обычным
+	r.Pdf.SetRightMargin(r.mright)
 
 	return nil
 }
@@ -476,10 +552,12 @@ func (r *PdfRenderer) Run(content []byte) error {
 // Parses all tables and sets the column width to the longest string in that column
 func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 	columnWidths := map[ast.Node][]float64{}
+	landscapeTables := map[ast.Node]bool{}
 	intable := false
 	inheader := true
 	cellnum := 0
 	lengths := []float64{}
+	minWidths := []float64{}
 	textlength := float64(0)
 	ast.WalkFunc(doc, func(node ast.Node, entering bool) ast.WalkStatus {
 		switch n := node.(type) {
@@ -488,6 +566,58 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 				intable = true
 			} else {
 				intable = false
+				// масштабировать ширины столбцов до ширины страницы
+				pageW, pageH := r.Pdf.GetPageSize()
+				_, _, rightM, _ := r.Pdf.GetMargins()
+				usableW := pageW - r.mleft - rightM
+				// Минимум каждого столбца = ширина самого длинного слова
+				// плюс поля ячейки. Это одновременно нижняя граница ширины
+				// столбца: колонка уже минимума рвёт слово по буквам, что
+				// портит даже таблицу, которая целиком помещается в полосу.
+				cellPad := 2 * r.Pdf.GetCellMargin()
+				totalW, totalMinW := 0.0, 0.0
+				for i := range lengths {
+					if i < len(minWidths) {
+						minWidths[i] += cellPad
+						if lengths[i] < minWidths[i] {
+							lengths[i] = minWidths[i]
+						}
+						totalMinW += minWidths[i]
+					}
+					totalW += lengths[i]
+				}
+				// широкая таблица получает альбомную страницу и
+				// масштабируется уже под её полосу
+				if landscapeW := pageH - r.mleft - rightM; r.wantsLandscape(totalW, totalMinW, usableW, landscapeW) {
+					landscapeTables[node] = true
+					usableW = landscapeW
+				}
+				if totalW > usableW {
+					// Оставшееся пространство распределяется пропорционально.
+					if totalMinW >= usableW {
+						// Даже минимумы не помещаются — равное распределение
+						equalW := usableW / float64(len(lengths))
+						for i := range lengths {
+							lengths[i] = equalW
+						}
+					} else {
+						remainingW := usableW - totalMinW
+						totalExtra := 0.0
+						for i, w := range lengths {
+							if extra := w - minWidths[i]; extra > 0 {
+								totalExtra += extra
+							}
+						}
+						for i := range lengths {
+							extra := lengths[i] - minWidths[i]
+							if extra > 0 && totalExtra > 0 {
+								lengths[i] = minWidths[i] + remainingW*(extra/totalExtra)
+							} else {
+								lengths[i] = minWidths[i]
+							}
+						}
+					}
+				}
 				columnWidths[node] = lengths
 			}
 
@@ -495,6 +625,7 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			inheader = entering
 			if entering {
 				lengths = []float64{}
+				minWidths = []float64{}
 			}
 		case *ast.TableRow:
 			if entering {
@@ -504,6 +635,7 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			if entering {
 				if inheader {
 					lengths = append(lengths, 0)
+					minWidths = append(minWidths, 0)
 				}
 			} else {
 				textlength += textlength * 0.2
@@ -517,13 +649,319 @@ func setColumnWidths(doc ast.Node, r *PdfRenderer) {
 			}
 		case *ast.Text:
 			if entering && intable {
-				l := r.Pdf.GetStringWidth(string(n.Literal))
+				text := string(n.Literal)
+				l := r.Pdf.GetStringWidth(text)
 				textlength += l
+				// Отслеживать ширину самого длинного слова для минимума столбца
+				for _, word := range strings.Fields(text) {
+					ww := r.Pdf.GetStringWidth(word)
+					ww += ww * 0.2 // тот же 20% запас, что и для натуральных ширин
+					if cellnum < len(minWidths) && ww > minWidths[cellnum] {
+						minWidths[cellnum] = ww
+					}
+				}
 			}
 		}
 		return ast.GoToNext
 	})
 	r.ColumnWidths = columnWidths
+	r.landscapeTables = landscapeTables
+}
+
+// landscapePreludeBudget — сколько знаков текста перед широкой таблицей стоит
+// забрать на её альбомную страницу. Больше — и текст занял бы страницу целиком,
+// не оставив места самой таблице.
+const landscapePreludeBudget = 1500
+
+// markLandscapePreludes отмечает блоки, которые уедут на альбомную страницу
+// вместе с идущей за ними широкой таблицей. Ориентация страницы выбирается в
+// момент её начала, поэтому текст перед таблицей иначе остаётся на портретной
+// странице, обрывает её на середине и оставляет пустоту до самого низа: сама
+// таблица портретную страницу дописать уже не может.
+//
+// Назад от таблицы отбираются подряд идущие блоки, пока их суммарный объём
+// держится в бюджете. Отбор прекращают другая АЛЬБОМНАЯ таблица (у неё своя
+// страница и своё преддверие), горизонтальная линия и превышение бюджета.
+// Обычная таблица преддверию не помеха: её столбцы посчитаны под портретную
+// полосу, и на альбомной странице она встанет так же, как текст.
+func markLandscapePreludes(doc ast.Node, r *PdfRenderer) {
+	prelude := map[ast.Node]bool{}
+	children := doc.GetChildren()
+	for i, node := range children {
+		table, ok := node.(*ast.Table)
+		if !ok || !r.landscapeTables[table] {
+			continue
+		}
+		budget := landscapePreludeBudget
+		for j := i - 1; j >= 0; j-- {
+			if prev, isTable := children[j].(*ast.Table); isTable && r.landscapeTables[prev] {
+				break // у той таблицы своя альбомная страница и своё преддверие
+			}
+			if _, isRule := children[j].(*ast.HorizontalRule); isRule {
+				break // черта отделяет разделы, за неё не заходим
+			}
+			size := blockTextLen(children[j])
+			if size > budget {
+				break
+			}
+			budget -= size
+			prelude[children[j]] = true
+		}
+	}
+	r.landscapePrelude = prelude
+}
+
+// blockTextLen — грубая оценка объёма блока: знаки его текста плюс надбавка на
+// сам блок (отбивка, маркеры, заголовок).
+func blockTextLen(node ast.Node) int {
+	n := 40
+	ast.WalkFunc(node, func(nd ast.Node, entering bool) ast.WalkStatus {
+		if entering {
+			if t, ok := nd.(*ast.Text); ok {
+				n += utf8.RuneCount(t.Literal)
+			}
+		}
+		return ast.GoToNext
+	})
+	return n
+}
+
+// wantsLandscape сообщает, нужна ли таблице альбомная страница. Разворот
+// стоит документу разрыва страницы и пустого места до и после таблицы,
+// поэтому его заслуживает лишь та таблица, которой портретная полоса
+// безнадёжна: натуральная ширина naturalW превышает даже альбомную полосу
+// (перенос слов неизбежен в любой ориентации, и альбом честно забирает всю
+// добавочную ширину) либо портретная полоса уже́ суммы самых длинных слов
+// minW, то есть столбцы пришлось бы рвать по буквам. Умеренный избыток между
+// портретной и альбомной полосой таблица переживает переносом слов на месте —
+// это дешевле пустых страниц.
+func (r *PdfRenderer) wantsLandscape(naturalW, minW, portraitW, landscapeW float64) bool {
+	return r.LandscapeWideTables &&
+		strings.HasPrefix(strings.ToLower(r.orientation), "p") &&
+		landscapeW > portraitW &&
+		(naturalW > landscapeW || minW > portraitW)
+}
+
+// addPageOriented начинает новую страницу заданной ориентации ("P" или "L").
+// Размер берётся из формата документа: PageSize(0) отдаёт его в портретных
+// координатах, fpdf сам меняет стороны местами для альбома.
+func (r *PdfRenderer) addPageOriented(orientation string) {
+	wd, ht, _ := r.Pdf.PageSize(0)
+	r.Pdf.AddPageFormat(orientation, fpdf.SizeType{Wd: wd, Ht: ht})
+}
+
+// enterLandscape отдаёт широкой таблице всю альбомную полосу. Страница
+// разворачивается только один раз на группу: соседняя широкая таблица и текст
+// между ними продолжаются на той же странице. Сообщает, начата ли страница.
+func (r *PdfRenderer) enterLandscape() bool {
+	r.inPrelude = false
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+	if r.inLandscape {
+		return false
+	}
+	r.addPageOriented("L")
+	r.inLandscape = true
+	return true
+}
+
+// widenToLandscape возвращает полосе набора всю альбомную ширину. Текст перед
+// широкой таблицей пишется во всю страницу: узкая колонка на альбомном листе
+// оставляет справа пустое поле и читается как чужая. Тексту ПОСЛЕ таблицы так
+// нельзя — он может перетечь на портретную страницу, где ширина уже другая, а
+// fpdf запоминает её в начале абзаца.
+func (r *PdfRenderer) widenToLandscape() {
+	if !r.inLandscape || !r.landscapeTail {
+		return
+	}
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+}
+
+// beginLandscapeTail пускает поток дальше по альбомной странице, вместо того
+// чтобы бросать её низ пустым. Колонка текста сужается до портретной ширины:
+// строки читаются как на остальных страницах, а перенос абзаца через границу
+// страниц безопасен — полоса набора одинакова в обеих ориентациях.
+//
+// Тождество полос — обязательное условие, а не украшение: fpdf считает ширину
+// строки один раз на входе в Write/MultiCell, поэтому абзац, начатый на
+// альбомной странице и продолженный на портретной, переносится верно только
+// пока обе полосы совпадают. Любая иная ширина хвоста молча испортит перенос.
+func (r *PdfRenderer) beginLandscapeTail() {
+	r.landscapeTail = true
+	r.tailWidePage = r.Pdf.PageNo()
+	pageW, pageH := r.Pdf.GetPageSize()
+	r.Pdf.SetRightMargin(pageW - pageH + r.mright)
+}
+
+// tailBlockHeight — оценка высоты блока при ширине полосы colW. Оценка
+// намеренно завышена: недооценка порвала бы абзац на границе ориентаций, где
+// ширина полосы меняется, и остаток абзаца вылез бы за поле.
+func (r *PdfRenderer) tailBlockHeight(node ast.Node, colW float64) float64 {
+	style := r.Normal
+	if head, ok := node.(*ast.Heading); ok {
+		style = r.headingStyle(head.Level)
+	}
+	r.setStyler(style)
+
+	lines, blocks := 0, 1
+	ast.WalkFunc(node, func(nd ast.Node, entering bool) ast.WalkStatus {
+		if !entering {
+			return ast.GoToNext
+		}
+		switch inner := nd.(type) {
+		case *ast.Text:
+			n := len(r.Pdf.SplitLines(inner.Literal, colW))
+			if n == 0 {
+				n = 1
+			}
+			lines += n
+		case *ast.ListItem, *ast.Paragraph, *ast.CodeBlock:
+			blocks++
+		}
+		return ast.GoToNext
+	})
+	if lines == 0 {
+		lines = 1
+	}
+	return float64(lines+blocks) * (style.Size + style.Spacing) * 1.2
+}
+
+// fitTailBlock решает судьбу блока, попавшего на альбомную страницу следом за
+// таблицей. Блок, помещающийся целиком, пишется во всю альбомную полосу: узкая
+// колонка на альбомном листе оставляет справа пустое поле. Блок, который не
+// помещается, уводит документ в портрет заранее — иначе абзац разорвался бы на
+// границе, где ширина полосы меняется. На следующих альбомных страницах полоса
+// снова портретной ширины: там абзац переносится на портретную страницу и обе
+// ширины обязаны совпадать.
+func (r *PdfRenderer) fitTailBlock(node ast.Node) {
+	if !r.landscapeTail || r.inPrelude || r.Pdf.PageNo() != r.tailWidePage {
+		return
+	}
+	if _, top := node.GetParent().(*ast.Document); !top {
+		return // не блок верхнего уровня — решение уже принято за него
+	}
+	if _, isTable := node.(*ast.Table); isTable {
+		return // таблица считает ширины сама
+	}
+
+	lm, _, _, bm := r.Pdf.GetMargins()
+	pageW, pageH := r.Pdf.GetPageSize()
+	if r.Pdf.GetY()+r.tailBlockHeight(node, pageW-lm-r.mright) <= pageH-bm {
+		r.Pdf.SetRightMargin(r.mright)
+		return
+	}
+	r.leaveLandscape()
+	r.addPageOriented("P")
+}
+
+// leaveLandscape возвращает документ в портрет. Правое поле восстанавливается
+// ДО новой страницы: футер уходящей альбомной страницы рисуется внутри
+// AddPageFormat и должен встать по центру всей её ширины.
+func (r *PdfRenderer) leaveLandscape() {
+	r.inLandscape = false
+	r.landscapeTail = false
+	r.Pdf.SetRightMargin(r.mright)
+}
+
+// acceptPageBreak решает судьбу автоматического разрыва страницы. Своих
+// случаев два. Замыкающая линия таблицы и перевод строки после неё имеют
+// нулевую высоту, и страница под них — пустая страница: разрыв отклоняется, а
+// заведёт страницу первый же настоящий блок. Дозаполняемая альбомная страница,
+// наоборот, разрыв заслужила, но fpdf развернул бы ещё одну альбомную, поэтому
+// портретную страницу рендерер заводит сам. Во всех прочих случаях решение
+// отдаётся fpdf: возвращается его собственный режим авто-разрыва.
+//
+// Flow:
+//
+//	```mermaid
+//	flowchart TD
+//	    A[fpdf: место кончилось] --> B{линия/перевод после таблицы?}
+//	    B -- да --> C[разрыв отклонить, страницу не заводить]
+//	    B -- нет --> D{преддверие таблицы или хвост альбома?}
+//	    D -- нет --> E[вернуть режим авто-разрыва fpdf]
+//	    D -- да --> F[завести страницу нужной ориентации самим]
+//	    F --> G[разрыв отклонить: пишем на новой странице]
+//	```
+func (r *PdfRenderer) acceptPageBreak() bool {
+	if r.suppressBreak {
+		return false
+	}
+	if !r.inPrelude && !r.landscapeTail {
+		auto, _ := r.Pdf.GetAutoPageBreak()
+		return auto
+	}
+	// Дальше страницу заводит рендерер: fpdf развернул бы её по текущей
+	// ориентации, а нужна другая. Родной путь разрыва (fpdf.go, CellFormat)
+	// сохраняет позицию строки и гасит межсловный интервал перед новой
+	// страницей: оператор Tw живёт в потоке страницы, поэтому на уходящей
+	// странице он обязан закрыться, иначе растянутые пробелы достанутся её
+	// футеру. Перехват обязан повторить это сам.
+	x := r.Pdf.GetX()
+	ws := r.Pdf.GetWordSpacing()
+	if ws != 0 {
+		r.Pdf.SetWordSpacing(0)
+	}
+	r.addPage()
+	r.Pdf.SetX(x)
+	if ws != 0 {
+		r.Pdf.SetWordSpacing(ws)
+	}
+	return false
+}
+
+// ensureFirstPage создаёт первую страницу под ориентацию первого же блока
+// документа. Страница, созданная заранее, была бы портретной, и документ,
+// который начинается широкой таблицей (или парой строк текста перед ней),
+// открывался бы почти пустым листом: развернуть уже открытую страницу fpdf
+// не позволяет.
+func (r *PdfRenderer) ensureFirstPage(node ast.Node, entering bool) {
+	if !entering || !r.pendingPage {
+		return
+	}
+	if _, isDoc := node.(*ast.Document); isDoc {
+		return // сам документ ничего не рисует
+	}
+	r.pendingPage = false
+	if table, ok := node.(*ast.Table); (ok && r.landscapeTables[table]) || r.inPrelude {
+		r.addPageOriented("L")
+		r.inLandscape = true
+		return // и таблица, и её преддверие пишутся во всю альбомную полосу
+	}
+	r.Pdf.AddPage()
+}
+
+// RequestNewPage откладывает следующую страницу до первого же блока документа,
+// чтобы её ориентацию выбрал он сам. Нужна тому, кто пишет что-то своё перед
+// содержимым — например страницу оглавления: обычный AddPage создал бы
+// портретную страницу, и широкая таблица за парой строк текста опять открыла
+// бы альбомную, бросив портретную полупустой.
+func (r *PdfRenderer) RequestNewPage() {
+	r.pendingPage = true
+}
+
+// addPage начинает новую страницу под продолжение таблицы. Перенос широкой
+// таблицы обязан остаться в альбоме, иначе её столбцы, посчитанные под
+// альбомную полосу, вылезут за портретную страницу. Обычная таблица, попавшая
+// на дозаполняемую альбомную страницу, посчитана под портретную полосу —
+// её продолжение уходит в портрет.
+func (r *PdfRenderer) addPage() {
+	switch {
+	case r.inPrelude:
+		// следом широкая таблица: страница открывается альбомной, даже если
+		// текущая уже альбомная — тогда таблица получит её целиком
+		r.addPageOriented("L")
+		r.inLandscape = true
+		r.landscapeTail = false
+		r.Pdf.SetRightMargin(r.mright)
+	case r.landscapeTail:
+		r.leaveLandscape()
+		r.addPageOriented("P")
+	case r.inLandscape:
+		r.addPageOriented("L")
+	default:
+		r.Pdf.AddPage()
+	}
 }
 
 // UpdateParagraphStyler - update with default styler
@@ -582,6 +1020,15 @@ func (r *PdfRenderer) writeLink(s Styler, display, url string) {
 // traversal to the next node.
 // (above taken verbatim from the blackfriday v2 package)
 func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
+	if entering && r.landscapePrelude[node] {
+		r.inPrelude = true
+		r.widenToLandscape()
+	}
+	if entering {
+		r.fitTailBlock(node)
+	}
+	r.ensureFirstPage(node, entering)
+
 	switch node := node.(type) {
 	case *ast.Text:
 		r.processText(node)
@@ -602,7 +1049,7 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 			r.tracer("DEL (leaving)", "Not handled")
 		}
 	case *ast.HTMLSpan:
-		r.tracer("HTMLSpan", "Not handled")
+		r.processHTMLSpan(node)
 	case *ast.Link:
 		r.processLink(*node, entering)
 	case *ast.Image:
@@ -618,7 +1065,7 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 	case *ast.HTMLBlock:
 		r.processHTMLBlock(node)
 	case *ast.Heading:
-		r.processHeading(*node, entering)
+		r.processHeading(node, entering)
 	case *ast.HorizontalRule:
 		r.processHorizontalRule(node)
 	case *ast.List:
@@ -637,8 +1084,8 @@ func (r *PdfRenderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.
 		r.processTableRow(node, entering)
 	case *ast.TableCell:
 		r.processTableCell(*node, entering)
-	/*case *ast.Math:
-	r.processMath(node)*/
+	case *ast.Math:
+		r.processMath(node)
 	default:
 		fmt.Printf("Unknown node type: %T. Skipping\n", node)
 	}
@@ -675,6 +1122,9 @@ func dorect(doc *fpdf.Fpdf, x, y, w, h float64, color Color) {
 
 // SetPageBackground - sets background colour of page. String IDs ("blue", "grey", etc) and `Color` structs are both supported
 func (r *PdfRenderer) SetPageBackground(colorStr string, color Color) {
+	if r.Pdf.PageNo() == 0 {
+		return // страницы ещё нет; каждую следующую красит header-функция
+	}
 	w, h := r.Pdf.GetPageSize()
 	if colorStr != "" {
 		color = Colorlookup(colorStr)

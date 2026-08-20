@@ -363,9 +363,9 @@
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7
 [cr()] LH=14
 [Text] This is a tag with unescaped backticks 
-[HTMLSpan] Not handled
+[HTMLSpan] <span attr='`ticks`'>
 [Text] bar
-[HTMLSpan] Not handled
+[HTMLSpan] </span>
 [Text] .
 [Paragraph (leaving)] 
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7
@@ -374,9 +374,9 @@
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7
 [cr()] LH=14
 [Text] This is a tag with backslashes 
-[HTMLSpan] Not handled
+[HTMLSpan] <span attr='\\backslashes\\'>
 [Text] bar
-[HTMLSpan] Not handled
+[HTMLSpan] </span>
 [Text] .
 [Paragraph (leaving)] 
 [... Margins (left, top, right, bottom:] 28.35 28.35 28.35 56.7

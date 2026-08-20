@@ -45,6 +45,7 @@ func (r *PdfRenderer) processText(node *ast.Text) {
 	currentStyle := r.cs.peek().textStyle
 	r.setStyler(currentStyle)
 	s := string(node.Literal)
+	s = strings.ReplaceAll(s, "\t", "    ") // TAB → 4 пробела (fpdf не поддерживает U+0009)
 	if !r.NeedBlockquoteStyleUpdate {
 		s = strings.ReplaceAll(s, "\n", " ")
 	}
@@ -81,10 +82,16 @@ func (r *PdfRenderer) processText(node *ast.Text) {
 	}
 }
 
-// This is a stub implementation. For now, the MathAjax extension is disabled.
+// processMath выводит literal-текст из MathJax-узла.
+// MathJax включён в CommonExtensions, поэтому $100 парсится как *ast.Math.
 func (r *PdfRenderer) processMath(node *ast.Math) {
 	currentStyle := r.cs.peek().textStyle
 	s := string(node.Literal)
+	if incell {
+		r.cs.peek().cellInnerString += s
+		r.cs.peek().cellInnerStringStyle = &currentStyle
+		return
+	}
 	r.write(currentStyle, s)
 }
 
@@ -252,17 +259,9 @@ func (r *PdfRenderer) processItem(node ast.ListItem, entering bool) {
 		// text/paragraphs in the item
 		r.cs.push(x)
 		if r.cs.peek().listkind == unordered {
-			tr := r.Pdf.UnicodeTranslatorFromDescriptor("")
-			bulletChar := tr("•")
-			currFontSize, _ := r.Pdf.GetFontSize()
-			if node.BulletChar != 45 { // if the bullet char is not '-'
-				bulletChar = tr("▪")
-				r.Pdf.SetFont("", "", 25)
-			}
 			r.Pdf.CellFormat(4*r.em, r.Normal.Size+r.Normal.Spacing,
-				bulletChar,
+				"•",
 				"", 0, "RB", false, 0, "")
-			r.Pdf.SetFont("", "", currFontSize)
 		} else if r.cs.peek().listkind == ordered {
 			r.Pdf.CellFormat(4*r.em, r.Normal.Size+r.Normal.Spacing,
 				fmt.Sprintf("%v.", r.cs.peek().itemNumber),
@@ -375,20 +374,28 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 		tempDir := os.TempDir() + "/" + filepath.Base(os.Args[0])
 		_, err := os.Stat(destination)
 		if errors.Is(err, os.ErrNotExist) {
-			// download the image so we can use it
+			// resolve source path: prepend InputBaseURL for relative paths
 			var source string = destination
 			if !strings.HasPrefix(destination, "http") {
 				if r.InputBaseURL != "" {
 					source = r.InputBaseURL + "/" + destination
 				}
 			}
-			os.MkdirAll(tempDir, 755)
-			err := downloadFile(source, tempDir+"/"+filepath.Base(destination))
-			if err != nil {
-				fmt.Println(err.Error())
+			if !strings.HasPrefix(source, "http") {
+				// local file — use resolved path directly
+				if _, statErr := os.Stat(source); statErr == nil {
+					destination = source
+				}
 			} else {
-				destination = tempDir + "/" + filepath.Base(destination)
-				fmt.Println("Downloaded image to: " + destination)
+				// remote file — download via HTTP
+				os.MkdirAll(tempDir, 755)
+				err := downloadFile(source, tempDir+"/"+filepath.Base(destination))
+				if err != nil {
+					fmt.Println(err.Error())
+				} else {
+					destination = tempDir + "/" + filepath.Base(destination)
+					fmt.Println("Downloaded image to: " + destination)
+				}
 			}
 		}
 		mtype, err := mimetype.DetectFile(destination)
@@ -432,9 +439,44 @@ func (r *PdfRenderer) processImage(node ast.Image, entering bool) {
 		var imgPath = destination
 		_, err = os.Stat(imgPath)
 		if err == nil {
-			r.Pdf.ImageOptions(destination,
-				-1, 0, 0, 0, true,
-				fpdf.ImageOptions{ImageType: "", ReadDpi: true}, 0, "")
+			imgType := ""
+			if mtype != nil {
+				switch {
+				case mtype.Is("image/png"):
+					imgType = "png"
+				case mtype.Is("image/jpeg"):
+					imgType = "jpg"
+				case mtype.Is("image/gif"):
+					imgType = "gif"
+				}
+			}
+			// Для тёмной темы — инвертировать яркость изображения.
+			if r.Theme == DARK || r.Theme == CUSTOM && r.isBackgroundDark() {
+				os.MkdirAll(tempDir, 0o755)
+				darkPath := tempDir + "/dark_" + filepath.Base(destination)
+				if err := invertLightness(destination, darkPath); err == nil {
+					destination = darkPath
+					imgType = "png" // invertLightness всегда выводит PNG
+				}
+			}
+
+			imgOpts := fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}
+			info := r.Pdf.RegisterImageOptions(destination, imgOpts)
+			if info != nil {
+				pageW, _ := r.Pdf.GetPageSize()
+				lm, _, rm, _ := r.Pdf.GetMargins()
+				contentW := pageW - lm - rm
+
+				// Scale down images that exceed content width.
+				var w float64
+				if info.Width() > contentW {
+					w = contentW
+				}
+
+				r.Pdf.ImageOptions(destination,
+					-1, 0, w, 0, true,
+					imgOpts, 0, "")
+			}
 		} else {
 			r.tracer("Image (file error)", err.Error())
 		}
@@ -518,9 +560,135 @@ func (r *PdfRenderer) processBlockQuote(node ast.Node, entering bool) {
 	}
 }
 
-func (r *PdfRenderer) processHeading(node ast.Heading, entering bool) {
+// tableStartLines — во сколько строк текста оценивается начало таблицы под
+// заголовком: шапка и первая строка данных вместе с полями ячеек.
+const tableStartLines = 4
+
+// centeringIndent — отступ, ставящий таблицу по центру полосы набора. Таблица
+// уже полосы прижималась к левому полю, и рядом с ней оставалась широкая
+// пустая колонка; по центру она читается как самостоятельный блок. Таблица во
+// всю полосу отступа не получает.
+func (r *PdfRenderer) centeringIndent(widths []float64) float64 {
+	total := 0.0
+	for _, w := range widths {
+		total += w
+	}
+	pageW, _ := r.Pdf.GetPageSize()
+	_, _, rm, _ := r.Pdf.GetMargins()
+	usable := pageW - r.cs.peek().leftMargin - rm
+	if total >= usable {
+		return 0
+	}
+	return (usable - total) / 2
+}
+
+// headingHeight — высота заголовка вместе с отбивкой под ним.
+func (r *PdfRenderer) headingHeight(level int, text string, colW float64) float64 {
+	style := r.headingStyle(level)
+	r.setStyler(style)
+	lines := len(r.Pdf.SplitLines([]byte(text), colW))
+	if lines == 0 {
+		lines = 1
+	}
+	return float64(lines+1) * (style.Size + style.Spacing)
+}
+
+// headingStyle отдаёт стиль заголовка по его уровню.
+func (r *PdfRenderer) headingStyle(level int) Styler {
+	switch level {
+	case 1:
+		return r.H1
+	case 2:
+		return r.H2
+	case 3:
+		return r.H3
+	case 4:
+		return r.H4
+	case 5:
+		return r.H5
+	default:
+		return r.H6
+	}
+}
+
+// nextSibling отдаёт следующий блок того же родителя.
+func nextSibling(node ast.Node) ast.Node {
+	parent := node.GetParent()
+	if parent == nil {
+		return nil
+	}
+	children := parent.GetChildren()
+	for i, child := range children {
+		if child == ast.Node(node) && i+1 < len(children) {
+			return children[i+1]
+		}
+	}
+	return nil
+}
+
+// keepHeadingWithText переносит заголовок на следующую страницу, если под ним
+// не осталось места хотя бы на одну строку текста. Одинокий заголовок внизу
+// листа оторван от своего раздела: читатель видит название, а содержание
+// начинается только после переворота страницы.
+//
+// Flow:
+//
+//	```mermaid
+//	flowchart TD
+//	    A[заголовок] --> B{за ним есть блок?}
+//	    B -- нет --> Z[оставить на месте]
+//	    B -- да --> C{страница только началась?}
+//	    C -- да --> Z
+//	    C -- нет --> D{заголовок + строка текста влезают?}
+//	    D -- да --> Z
+//	    D -- нет --> E[перенести на следующую страницу]
+//	```
+func (r *PdfRenderer) keepHeadingWithText(node *ast.Heading) {
+	follow := nextSibling(node)
+	if follow == nil {
+		return // заголовок замыкает раздел — отрывать его не от чего
+	}
+	lm, topM, rm, bottomM := r.Pdf.GetMargins()
+	y := r.Pdf.GetY()
+	if y <= topM+1 {
+		return // страница только началась: перенос дал бы пустой лист
+	}
+
+	pageW, pageH := r.Pdf.GetPageSize()
+	colW := pageW - lm - rm
+
+	// сам заголовок и отбивка после него; подзаголовок сразу за заголовком
+	// висел бы точно так же, поэтому цепочка считается до первого настоящего
+	// блока раздела
+	need := r.headingHeight(node.Level, ast.ToString(node.AsContainer()), colW)
+	for {
+		head, isHeading := follow.(*ast.Heading)
+		if !isHeading {
+			break
+		}
+		need += r.headingHeight(head.Level, ast.ToString(head.AsContainer()), colW)
+		follow = nextSibling(follow)
+		if follow == nil {
+			return // дальше только заголовки до конца документа
+		}
+	}
+
+	// начало раздела: строка текста, а для таблицы — шапка с первой строкой
+	// данных, которые тоньше не разрываются и утащили бы заголовок за собой
+	startLines := 1.0
+	if _, isTable := follow.(*ast.Table); isTable {
+		startLines = tableStartLines
+	}
+	need += startLines * (r.Normal.Size + r.Normal.Spacing)
+	if y+need > pageH-bottomM {
+		r.addPage()
+	}
+}
+
+func (r *PdfRenderer) processHeading(node *ast.Heading, entering bool) {
 	if entering {
 		r.cr()
+		r.keepHeadingWithText(node)
 		switch node.Level {
 		case 1:
 			r.tracer("Heading (1, entering)", fmt.Sprintf("%v", ast.ToString(node.AsContainer())))
@@ -569,18 +737,18 @@ func (r *PdfRenderer) processHeading(node ast.Heading, entering bool) {
 func (r *PdfRenderer) processHorizontalRule(node ast.Node) {
 	r.tracer("HorizontalRule", "")
 	if r.HorizontalRuleNewPage {
-		r.Pdf.AddPage()
+		r.addPage()
 	} else {
 		// do a newline
 		r.cr()
 		// get the current x and y (assume left margin in ok)
 		x, y := r.Pdf.GetXY()
 		// get the page margins
-		lm, _, _, _ := r.Pdf.GetMargins()
+		_, _, rm, _ := r.Pdf.GetMargins()
 		// get the page size
 		w, _ := r.Pdf.GetPageSize()
-		// now compute the x value of the right side of page
-		newx := w - lm
+		// now compute the x value of the right side of the text column
+		newx := w - rm
 		r.tracer("... From X,Y", fmt.Sprintf("%v,%v", x, y))
 		r.Pdf.MoveTo(x, y)
 		r.tracer("...   To X,Y", fmt.Sprintf("%v,%v", newx, y))
@@ -593,6 +761,22 @@ func (r *PdfRenderer) processHorizontalRule(node ast.Node) {
 	}
 }
 
+// processHTMLSpan обрабатывает inline HTML.
+// Для <br /> внутри ячейки таблицы — добавляет перенос строки в cellInnerString.
+func (r *PdfRenderer) processHTMLSpan(node *ast.HTMLSpan) {
+	literal := strings.TrimSpace(strings.ToLower(string(node.Literal)))
+	isBR := literal == "<br>" || literal == "<br/>" || literal == "<br />"
+	if isBR && incell {
+		r.cs.peek().cellInnerString += "\n"
+		return
+	}
+	if isBR {
+		r.cr()
+		return
+	}
+	r.tracer("HTMLSpan", string(node.Literal))
+}
+
 func (r *PdfRenderer) processHTMLBlock(node ast.Node) {
 	r.tracer("HTMLBlock", string(node.AsLeaf().Literal))
 	r.cr()
@@ -602,26 +786,165 @@ func (r *PdfRenderer) processHTMLBlock(node ast.Node) {
 	r.cr()
 }
 
-func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
-	if entering {
-		r.tracer("Table (entering)", "")
-		x := &containerState{
-			textStyle: r.THeader, listkind: notlist,
-			leftMargin: r.cs.peek().leftMargin}
-		r.cr()
-		r.cs.push(x)
-		fill = false
-		cellwidths = r.ColumnWidths[node]
+// rowHeight вычисляет высоту строки текста и общую высоту строки таблицы.
+func (r *PdfRenderer) rowHeight(cells []cellContent) (lineH, rowH float64) {
+	maxLines := 1
+	for i, cell := range cells {
+		if i >= len(cellwidths) {
+			break
+		}
+		r.setStyler(cell.style)
+		lines := r.Pdf.SplitText(cell.text, cellwidths[i])
+		if len(lines) > maxLines {
+			maxLines = len(lines)
+		}
+	}
+	lineH = cells[0].style.Size + cells[0].style.Spacing
+	rowH = lineH * float64(maxLines)
+	return lineH, rowH
+}
+
+// renderCells рендерит набор ячеек как строку таблицы.
+func (r *PdfRenderer) renderCells(cells []cellContent, lineH, rowH float64, isFill bool) {
+	// Отступ считается на каждую строку: таблица может начаться на альбомной
+	// странице и продолжиться на портретной, где полоса набора другая.
+	startX := r.cs.peek().leftMargin + r.centeringIndent(cellwidths)
+	startY := r.Pdf.GetY()
+	x := startX
+
+	// Цвет границ таблицы: видимый на текущем фоне.
+	if r.isBackgroundDark() {
+		r.Pdf.SetDrawColor(100, 100, 100)
 	} else {
+		r.Pdf.SetDrawColor(200, 200, 200)
+	}
+
+	for i, cell := range cells {
+		if i >= len(cellwidths) {
+			break
+		}
+		w := cellwidths[i]
+		r.setStyler(cell.style)
+		if cell.isHeader || isFill {
+			r.Pdf.Rect(x, startY, w, rowH, "F")
+		}
+		if cell.isHeader {
+			r.Pdf.Rect(x, startY, w, rowH, "D")
+		} else {
+			r.Pdf.Line(x, startY, x, startY+rowH)
+			r.Pdf.Line(x+w, startY, x+w, startY+rowH)
+		}
+		r.Pdf.SetXY(x, startY)
+		align := ""
+		if cell.isHeader {
+			align = "C"
+		}
+		r.Pdf.MultiCell(w, lineH, cell.text, "", align, false)
+		x += w
+	}
+	r.Pdf.SetXY(startX, startY+rowH)
+}
+
+// renderTableRow рендерит буферизированную строку таблицы с word wrap.
+// Все ячейки строки рендерятся с одинаковой высотой (максимальной из всех).
+//
+// Заголовок рендерится отложенно: при обработке header row он сохраняется,
+// но НЕ рендерится. При первом body row обе высоты известны точно —
+// выполняется exact check headerH + bodyRowH > available.
+func (r *PdfRenderer) renderTableRow() {
+	if len(rowCells) == 0 {
+		return
+	}
+
+	lineH, rowH := r.rowHeight(rowCells)
+	_, pageH := r.Pdf.GetPageSize()
+	_, _, _, bottomM := r.Pdf.GetMargins()
+
+	if rowCells[0].isHeader {
+		// Отложенный рендеринг: сохранить заголовок, но НЕ рендерить.
+		// Рендерим при первом body row, когда высота обоих известна точно.
+		headerCells = make([]cellContent, len(rowCells))
+		copy(headerCells, rowCells)
+		headerRendered = false
+		return
+	}
+
+	if !headerRendered && len(headerCells) > 0 {
+		// Первый body row — рендерим отложенный заголовок + body row.
+		hLineH, hRowH := r.rowHeight(headerCells)
+		if r.Pdf.GetY()+hRowH+rowH > pageH-bottomM {
+			r.addPage()
+		}
+		r.renderCells(headerCells, hLineH, hRowH, false)
+		headerRendered = true
+		fill = false
+	} else if r.Pdf.GetY()+rowH > pageH-bottomM {
+		// Не первый body row — page break + repeat header.
 		wSum := 0.0
 		for _, w := range cellwidths {
 			wSum += w
 		}
 		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
 
+		r.addPage()
+		if len(headerCells) > 0 {
+			hLineH, hRowH := r.rowHeight(headerCells)
+			r.renderCells(headerCells, hLineH, hRowH, false)
+			fill = false
+		}
+	}
+
+	r.renderCells(rowCells, lineH, rowH, fill)
+}
+
+func (r *PdfRenderer) processTable(node ast.Node, entering bool) {
+	if entering {
+		r.tracer("Table (entering)", "")
+		x := &containerState{
+			textStyle: r.THeader, listkind: notlist,
+			leftMargin: r.cs.peek().leftMargin}
+		// Разворот идёт ДО перевода строки: перевод на дозаполняемой
+		// альбомной странице мог бы сам утянуть документ обратно в портрет.
+		if r.landscapeTables[node] {
+			if !r.enterLandscape() {
+				r.cr()
+			}
+		} else {
+			r.cr()
+		}
+		r.cs.push(x)
+		fill = false
+		headerCells = nil
+		headerRendered = false
+		cellwidths = r.ColumnWidths[node]
+	} else {
+		if !headerRendered && len(headerCells) > 0 {
+			hLineH, hRowH := r.rowHeight(headerCells)
+			r.renderCells(headerCells, hLineH, hRowH, false)
+			headerRendered = true
+		}
+
+		wSum := 0.0
+		for _, w := range cellwidths {
+			wSum += w
+		}
+		// Замыкающая линия и перевод строки после таблицы разрыва не стоят:
+		// у нижнего края они заводят страницу под одну черту, а если за
+		// таблицей ничего нет — просто пустую. Страницу заведёт первый же
+		// настоящий блок текста, когда упрётся в нижний край.
+		r.suppressBreak = true
+		r.Pdf.CellFormat(wSum, 0, "", "T", 0, "", false, 0, "")
+
 		r.cs.pop()
 		r.tracer("Table (leaving)", "")
+		// Хвост включается ДО перевода строки: иначе перевод пробил бы разрыв
+		// с выключенным хвостом и документ получил бы ещё одну альбомную
+		// страницу под один абзац.
+		if r.inLandscape {
+			r.beginLandscapeTail()
+		}
 		r.cr()
+		r.suppressBreak = false
 	}
 }
 
@@ -648,7 +971,6 @@ func (r *PdfRenderer) processTableBody(node ast.Node, entering bool) {
 	} else {
 		r.cs.pop()
 		r.tracer("TableBody (leaving)", "")
-		r.Pdf.Ln(-1)
 	}
 }
 
@@ -661,12 +983,13 @@ func (r *PdfRenderer) processTableRow(node ast.Node, entering bool) {
 		if r.cs.peek().isHeader {
 			x.textStyle = r.THeader
 		}
-		r.Pdf.Ln(-1)
 
 		// initialize cell widths slice; only one table at a time!
 		curdatacell = 0
+		rowCells = nil
 		r.cs.push(x)
 	} else {
+		r.renderTableRow()
 		r.cs.pop()
 		r.tracer("TableRow (leaving)", "")
 		fill = !fill
@@ -698,19 +1021,11 @@ func (r *PdfRenderer) processTableCell(node ast.TableCell, entering bool) {
 		if cs.cellInnerStringStyle != nil {
 			currentStyle = *cs.cellInnerStringStyle
 		}
-		s := cs.cellInnerString
-		w := cellwidths[curdatacell]
-		if cs.isHeader {
-			h, _ := r.Pdf.GetFontSize()
-			h += currentStyle.Spacing
-			r.tracer("... table header cell",
-				fmt.Sprintf("Width=%v, height=%v", w, h))
-
-			r.Pdf.CellFormat(w, h, s, "1", 0, "C", true, 0, "")
-		} else {
-			h := currentStyle.Size + currentStyle.Spacing
-			r.Pdf.CellFormat(w, h, s, "LR", 0, "", fill, 0, "")
-		}
+		rowCells = append(rowCells, cellContent{
+			text:     cs.cellInnerString,
+			style:    currentStyle,
+			isHeader: cs.isHeader,
+		})
 		r.tracer("TableCell (leaving)", "")
 		curdatacell++
 	}
